@@ -1,0 +1,6 @@
+ccxt[pro]>=4.3.0
+pandas>=2.0.0
+pandas_ta>=0.3.14b
+numpy>=1.26.0
+requests>=2.31.0
+aiohttp>=3.9.0

@@ -1,0 +1,39 @@
+name: BTC Futures Scanner
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'   # every 5 minutes (GitHub's minimum)
+  workflow_dispatch:          # allows manual trigger from GitHub UI
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write         # needed to commit alerts.jsonl back to repo
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install "ccxt[pro]" pandas pandas_ta numpy requests aiohttp
+
+      - name: Run scanner
+        env:
+          TELEGRAM_TOKEN:   ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python scanner_oneshot.py
+
+      - name: Save alerts log
+        run: |
+          git config user.email "btc-scanner@github-actions"
+          git config user.name  "BTC Scanner Bot"
+          git add alerts.jsonl 2>/dev/null || true
+          git diff --staged --quiet || git commit -m "scanner: update alerts log [skip ci]"
+          git push
