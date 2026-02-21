@@ -970,8 +970,9 @@ if __name__ == "__main__":
     if sys.platform == "win32":
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
-    # Start health-check server if running in a container / cloud environment
-    if os.getenv("KOYEB_APP_NAME") or os.getenv("HEALTH_PORT") or os.getenv("DOCKER_ENV"):
+    # Health-check server only starts if HEALTH_PORT is explicitly set.
+    # When running via start.sh, dashboard.py already serves on port 8000.
+    if os.getenv("HEALTH_PORT"):
         _start_health_server()
 
     try:
