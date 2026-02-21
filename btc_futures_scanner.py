@@ -30,9 +30,11 @@ import logging
 import os
 import sys
 import time
+import threading
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from collections import deque
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Dict, Optional, Tuple
 
 import aiohttp
@@ -167,6 +169,14 @@ class DataManager:
             "options":         {"defaultType": "future"},
             "timeout":         30000,   # 30 s – exchangeInfo is a large payload
         }
+        # Optional HTTP proxy – set HTTP_PROXY env var if Binance is geo-blocked
+        # e.g.  export HTTP_PROXY=http://user:pass@proxyhost:port
+        _proxy = os.getenv("HTTP_PROXY", os.getenv("http_proxy", "")).strip()
+        if _proxy:
+            exchange_opts["proxies"]       = {"http": _proxy, "https": _proxy}
+            exchange_opts["aiohttp_proxy"] = _proxy
+            log.info(f"Using proxy: {_proxy.split('@')[-1]}")  # host only, not credentials
+
         self._ws   = ccxtpro.binanceusdm(exchange_opts)
         self._rest = ccxt.binanceusdm(exchange_opts)
 
@@ -923,6 +933,35 @@ class BTCFuturesScanner:
 
 
 # ---------------------------------------------------------------------------
+# Health-Check Server (for Koyeb / Docker platforms)
+# ---------------------------------------------------------------------------
+def _start_health_server() -> None:
+    """
+    Start a minimal HTTP server in a background daemon thread.
+    Responds GET / → 200 OK so Koyeb / Railway / Fly.io health checks pass.
+    Port is read from the HEALTH_PORT env var (default 8000).
+    """
+    port = int(os.getenv("HEALTH_PORT", "8000"))
+
+    class _Handler(BaseHTTPRequestHandler):
+        def log_message(self, _fmt, *_args):
+            pass  # silence access logs
+
+        def do_GET(self):
+            body = b"OK"
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    server = HTTPServer(("0.0.0.0", port), _Handler)
+    t = threading.Thread(target=server.serve_forever, daemon=True)
+    t.start()
+    log.info(f"Health-check server listening on port {port}")
+
+
+# ---------------------------------------------------------------------------
 # Entry Point
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
@@ -930,6 +969,11 @@ if __name__ == "__main__":
     # Python 3.8+ defaults to ProactorEventLoop which breaks async HTTP.
     if sys.platform == "win32":
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
+    # Start health-check server if running in a container / cloud environment
+    if os.getenv("KOYEB_APP_NAME") or os.getenv("HEALTH_PORT") or os.getenv("DOCKER_ENV"):
+        _start_health_server()
+
     try:
         asyncio.run(BTCFuturesScanner().run())
     except KeyboardInterrupt:
