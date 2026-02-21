@@ -128,7 +128,7 @@ def compute_stats(trades: List[Dict]) -> Dict:
         elif t["outcome"] == "LOSS":
             running -= 1.0
         cumulative.append({
-            "ts":      t["timestamp"][:16].replace("T", " "),
+            "ts":      t["timestamp"],
             "val":     round(running, 3),
             "tf":      t["tf"],
             "outcome": t["outcome"],
@@ -330,8 +330,13 @@ Chart.defaults.font.size   = 11;
 const C = { green:'#3fb950', red:'#f85149', yellow:'#d29922', blue:'#58a6ff', purple:'#bc8cff' };
 
 // Convert UTC timestamp string to IST (UTC+5:30)
+// Uses manual offset so result is correct regardless of server location or browser locale
 function toIST(ts) {
-  return new Date(ts).toLocaleString('sv-SE', { timeZone: 'Asia/Kolkata' }).slice(0, 16) + ' IST';
+  const d   = new Date(ts);
+  const ist = new Date(d.getTime() + 330 * 60 * 1000); // add 5h 30m
+  const pad = n => String(n).padStart(2, '0');
+  return ist.getUTCFullYear() + '-' + pad(ist.getUTCMonth() + 1) + '-' + pad(ist.getUTCDate()) +
+         ' ' + pad(ist.getUTCHours()) + ':' + pad(ist.getUTCMinutes()) + ' IST';
 }
 
 document.getElementById('gen-ts').textContent = 'Generated ' + new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' });
@@ -447,7 +452,7 @@ document.getElementById('gen-ts').textContent = 'Generated ' + new Date().toLoca
   const pnl = STATS.cumulative_pnl || [];
   if (!pnl.length) return;
   const step   = Math.max(1, Math.floor(pnl.length / 24));
-  const labels = pnl.map((p,i) => i % step === 0 ? p.ts.slice(5) : '');
+  const labels = pnl.map((p,i) => i % step === 0 ? toIST(p.ts).slice(5, 16) : '');
   const data   = pnl.map(p => p.val);
   const final  = data[data.length-1];
   new Chart(document.getElementById('pnlChart'), {
@@ -469,7 +474,7 @@ document.getElementById('gen-ts').textContent = 'Generated ' + new Date().toLoca
       plugins: {
         legend:{ display:false },
         tooltip:{ callbacks:{
-          title: items => pnl[items[0].dataIndex].ts,
+          title: items => toIST(pnl[items[0].dataIndex].ts),
           label: ctx  => (ctx.raw>=0?'+':'')+ctx.raw.toFixed(3)+'R  ['+pnl[ctx.dataIndex].tf+' '+pnl[ctx.dataIndex].outcome+']'
         }}
       },
@@ -506,7 +511,7 @@ function renderTable() {
   document.getElementById('tradesBody').innerHTML = filtered.map(t => `
     <tr>
       <td><code style="color:var(--muted);font-size:0.78rem">${t.tf}</code></td>
-      <td style="color:var(--muted);white-space:nowrap;font-size:0.78rem">${t.timestamp.slice(0,16).replace('T',' ')}</td>
+      <td style="color:var(--muted);white-space:nowrap;font-size:0.78rem">${toIST(t.timestamp)}</td>
       <td>${bp(t.direction.toLowerCase(), t.direction)}</td>
       <td class="text-end">${fmt(t.entry)}</td>
       <td class="text-end win">${fmt(t.target_1)}</td>
