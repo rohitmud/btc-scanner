@@ -9,5 +9,11 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy source
 COPY . .
 
-# Run the scanner
-CMD ["python", "-u", "btc_futures_scanner.py"]
+# Make entrypoint executable
+RUN chmod +x start.sh
+
+# Expose dashboard port (Koyeb reads PORT env var)
+EXPOSE 8000
+
+# Run scanner + dashboard together
+CMD ["/bin/bash", "start.sh"]

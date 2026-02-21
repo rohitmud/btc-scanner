@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import os
 import sys
 import threading
 import webbrowser
@@ -703,12 +704,15 @@ def make_handler(alerts_path: str, backtest_path: str, poll_interval: int):
 
 
 def serve(alerts_path: str, backtest_path: str, port: int, poll_interval: int) -> None:
+    # In cloud environments bind to all interfaces; locally bind to loopback only
+    host = "0.0.0.0" if os.getenv("PORT") or os.getenv("KOYEB_APP_NAME") else "127.0.0.1"
     handler = make_handler(alerts_path, backtest_path, poll_interval)
-    server  = HTTPServer(("127.0.0.1", port), handler)
+    server  = HTTPServer((host, port), handler)
     url     = f"http://localhost:{port}/"
     print(f"Dashboard server -> {url}  (Ctrl+C to stop)")
-    print(f"Data refreshes on every page load. Alerts panel polls every {poll_interval}s.")
-    threading.Timer(0.5, lambda: webbrowser.open(url)).start()
+    print(f"Bound to {host}:{port}. Alerts panel polls every {poll_interval}s.")
+    if host == "127.0.0.1":
+        threading.Timer(0.5, lambda: webbrowser.open(url)).start()
     try:
         server.serve_forever()
     except KeyboardInterrupt:
@@ -729,8 +733,8 @@ def main() -> None:
                         help="Output HTML file for static mode  (default: dashboard.html)")
     parser.add_argument("--serve",     action="store_true",
                         help="Start a live HTTP server instead of writing a static file")
-    parser.add_argument("--port",      type=int, default=5000,
-                        help="Port for --serve mode  (default: 5000)")
+    parser.add_argument("--port",      type=int, default=int(os.getenv("PORT", "5000")),
+                        help="Port for --serve mode  (default: PORT env var or 5000)")
     parser.add_argument("--interval",  type=int, default=30,
                         help="Alert poll interval in seconds for --serve mode  (default: 30)")
     args = parser.parse_args()
