@@ -234,42 +234,56 @@ class DataManager:
                     pass
                 await asyncio.sleep(wait)
 
-    # ── Streaming ────────────────────────────────────────────────────────
+    # ── Poll interval per timeframe (seconds) ────────────────────────────
+    _POLL_SECONDS: Dict[str, int] = {
+        "1m": 30, "3m": 60, "5m": 60, "15m": 120, "30m": 180, "1h": 300,
+    }
+
+    # ── Streaming (REST polling – works in geo-restricted cloud envs) ─────
 
     async def stream_ohlcv(self, tf: str, callback) -> None:
         """
-        Perpetually stream OHLCV via WebSocket.  Fires `callback(tf, df)`
-        whenever a new (closed) candle arrives.  Reconnects automatically.
+        Poll OHLCV via async REST every N seconds and fire `callback(tf, df)`
+        whenever a new closed candle arrives.  Uses REST instead of WebSocket
+        so it works in cloud environments where Binance WebSocket is blocked.
         """
         prev_ts: int = 0
-        cfg = self._cfg
+        poll_s = self._POLL_SECONDS.get(tf, 60)
+
         while True:
             try:
-                candles = await self._ws.watch_ohlcv(self._symbol, tf)
+                candles = await self._ws.fetch_ohlcv(self._symbol, tf, limit=200)
+                new_candles = 0
                 for c in candles:
                     if c[0] > prev_ts:
                         prev_ts = c[0]
                         self._bufs[tf].append(c)
-                        df = self._to_dataframe(tf)
-                        if df is not None:
-                            await callback(tf, df)
-                            # Heartbeat so dashboard /status can confirm scanner is alive
-                            try:
-                                with open("scanner_heartbeat.txt", "w") as _hb:
-                                    _hb.write(datetime.now(timezone.utc).isoformat())
-                            except OSError:
-                                pass
+                        new_candles += 1
+
+                if new_candles > 0:
+                    df = self._to_dataframe(tf)
+                    if df is not None:
+                        await callback(tf, df)
+                        # Heartbeat so /status can confirm scanner is alive
+                        try:
+                            with open("scanner_heartbeat.txt", "w") as _hb:
+                                _hb.write(datetime.now(timezone.utc).isoformat())
+                        except OSError:
+                            pass
+
+                await asyncio.sleep(poll_s)
 
             except ccxt.RateLimitExceeded:
-                wait = cfg["rate_limit_backoff"] ** 2
-                log.warning(f"[{tf}] WS rate-limit – pausing {wait:.0f}s")
-                await asyncio.sleep(wait)
-            except ccxt.NetworkError as exc:
-                log.error(f"[{tf}] WS network error: {exc} – reconnecting …")
-                await asyncio.sleep(3)
+                log.warning(f"[{tf}] rate-limit – backing off 60s …")
+                await asyncio.sleep(60)
             except Exception as exc:
-                log.error(f"[{tf}] Unexpected WS error: {exc}")
-                await asyncio.sleep(5)
+                log.error(f"[{tf}] poll error: {exc} – retrying in 15s …")
+                try:
+                    with open("scanner_error.txt", "w") as _ef:
+                        _ef.write(f"{datetime.now(timezone.utc).isoformat()} | [{tf}] poll: {exc}")
+                except OSError:
+                    pass
+                await asyncio.sleep(15)
 
     # ── DataFrame Factory ────────────────────────────────────────────────
 
