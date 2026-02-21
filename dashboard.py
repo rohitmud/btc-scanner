@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+from datetime import datetime, timezone
 import json
 import os
 import sys
@@ -700,6 +701,38 @@ def make_handler(alerts_path: str, backtest_path: str, poll_interval: int):
             elif self.path == "/api/alerts":
                 alerts = read_alerts_jsonl(alerts_path)
                 body   = json.dumps(alerts, ensure_ascii=False).encode("utf-8")
+                self._send(200, "application/json", body)
+
+            elif self.path == "/status":
+                # Scanner health check — visit /status in browser to see live state
+                now_utc = datetime.now(timezone.utc).isoformat()
+
+                # Heartbeat file written by scanner on every candle
+                hb_path = Path("scanner_heartbeat.txt")
+                if hb_path.exists():
+                    hb_ts  = hb_path.read_text().strip()
+                    try:
+                        hb_dt  = datetime.fromisoformat(hb_ts)
+                        age_s  = int((datetime.now(timezone.utc) - hb_dt).total_seconds())
+                        scanner_alive = age_s < 300  # alive if heartbeat < 5 min ago
+                    except ValueError:
+                        hb_ts, age_s, scanner_alive = "invalid", -1, False
+                else:
+                    hb_ts, age_s, scanner_alive = "never", -1, False
+
+                # Alerts summary
+                all_alerts = read_alerts_jsonl(alerts_path)
+                last_alert = all_alerts[-1].get("timestamp") if all_alerts else None
+
+                status = {
+                    "server_time_utc":        now_utc,
+                    "scanner_alive":          scanner_alive,
+                    "scanner_last_heartbeat": hb_ts,
+                    "heartbeat_age_seconds":  age_s,
+                    "alerts_count":           len(all_alerts),
+                    "last_alert_timestamp":   last_alert,
+                }
+                body = json.dumps(status, indent=2).encode("utf-8")
                 self._send(200, "application/json", body)
 
             else:

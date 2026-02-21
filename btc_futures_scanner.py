@@ -92,8 +92,8 @@ CONFIG: dict = {
     # Set via environment variables (recommended) or paste values directly.
     #   Windows:  set TELEGRAM_TOKEN=123:ABC   &&  set TELEGRAM_CHAT_ID=-1001234
     #   Linux:    export TELEGRAM_TOKEN=...    &&  export TELEGRAM_CHAT_ID=...
-    "telegram_token":   os.getenv("TELEGRAM_TOKEN",   ""),
-    "telegram_chat_id": os.getenv("TELEGRAM_CHAT_ID", ""),
+    "telegram_token":   os.getenv("bot8517637983:AAFlP6R3Gcz6BzyEPcjfKRv_oSje6faO2gM",   ""),
+    "telegram_chat_id": os.getenv("548714316", ""),
 
     # ── WhatsApp Notifications (via CallMeBot – free) ─────────────────────
     # Setup (one-time, 2 minutes):
@@ -236,6 +236,12 @@ class DataManager:
                         df = self._to_dataframe(tf)
                         if df is not None:
                             await callback(tf, df)
+                            # Heartbeat so dashboard /status can confirm scanner is alive
+                            try:
+                                with open("scanner_heartbeat.txt", "w") as _hb:
+                                    _hb.write(datetime.now(timezone.utc).isoformat())
+                            except OSError:
+                                pass
 
             except ccxt.RateLimitExceeded:
                 wait = cfg["rate_limit_backoff"] ** 2
