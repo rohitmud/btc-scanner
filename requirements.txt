@@ -1,15 +1,6 @@
-# BTC Futures Market Scanner – Python dependencies
-# Install with:  pip install -r requirements.txt
-
-# Core exchange connectivity (WebSocket + REST)
 ccxt[pro]>=4.3.0
-
-# Numerical / data
 numpy>=1.26.0
 pandas>=2.2.0
-
-# Technical indicators (pandas accessor)
-pandas_ta>=0.3.14b
-
-# (Optional) pretty async REPL during development
-ipython>=8.0.0
+pandas_ta>=0.4.0
+aiohttp>=3.9.0
+requests>=2.31.0

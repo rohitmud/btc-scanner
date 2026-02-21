@@ -328,7 +328,12 @@ Chart.defaults.font.size   = 11;
 
 const C = { green:'#3fb950', red:'#f85149', yellow:'#d29922', blue:'#58a6ff', purple:'#bc8cff' };
 
-document.getElementById('gen-ts').textContent = 'Generated ' + new Date().toLocaleString();
+// Convert UTC timestamp string to IST (UTC+5:30)
+function toIST(ts) {
+  return new Date(ts).toLocaleString('sv-SE', { timeZone: 'Asia/Kolkata' }).slice(0, 16) + ' IST';
+}
+
+document.getElementById('gen-ts').textContent = 'Generated ' + new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' });
 
 // ─── Summary Cards ────────────────────────────────────────────────────────
 (function renderCards() {
@@ -536,16 +541,17 @@ function renderTable() {
       <div class="d-flex justify-content-between align-items-center">
         <div>
           ${bp(a.signal_type.toLowerCase(), a.signal_type)}
-          <span style="color:var(--muted);font-size:0.78rem;margin-left:8px">${a.timeframe} &nbsp; ${a.timestamp.slice(0,16).replace('T',' ')} UTC</span>
+          <span style="color:var(--muted);font-size:0.78rem;margin-left:8px">${a.timeframe} &nbsp; ${toIST(a.timestamp)}</span>
         </div>
         <span style="font-weight:700;color:${confColor(a.confidence_score)}">${a.confidence_score}/100</span>
       </div>
       <div style="margin-top:8px;font-size:0.85rem;">
-        <span style="color:var(--muted)">Entry</span> <b>$${parseFloat(a.entry_price).toLocaleString(undefined,{minimumFractionDigits:2})}</b>
+        <span style="color:var(--muted)">Entry</span> <b style="color:#ffffff">$${parseFloat(a.entry_price||a.entry).toLocaleString(undefined,{minimumFractionDigits:2})}</b>
         &nbsp;&nbsp;<span style="color:var(--muted)">T1</span> <b class="win">$${parseFloat(a.target_1).toLocaleString(undefined,{minimumFractionDigits:2})}</b>
+        &nbsp;&nbsp;<span style="color:var(--muted)">T2</span> <b class="win">$${parseFloat(a.target_2||a.target_1).toLocaleString(undefined,{minimumFractionDigits:2})}</b>
         &nbsp;&nbsp;<span style="color:var(--muted)">SL</span> <b class="loss">$${parseFloat(a.stop_loss).toLocaleString(undefined,{minimumFractionDigits:2})}</b>
-        &nbsp;&nbsp;<span style="color:var(--muted)">R:R</span> <b>${a.risk_reward}x</b>
-        &nbsp;&nbsp;<span style="color:var(--muted);font-size:0.78rem">${a.oi_signal}</span>
+        &nbsp;&nbsp;<span style="color:var(--muted)">R:R</span> <b>${parseFloat(a.risk_reward||a.rr||0).toFixed(2)}x</b>
+        ${a.oi_signal ? `&nbsp;&nbsp;<span style="color:var(--muted);font-size:0.78rem">${a.oi_signal}</span>` : ''}
       </div>
       <div style="margin-top:6px">${chips}</div>
     </div>`;
@@ -555,7 +561,9 @@ function renderTable() {
 // ─── Live Polling (serve mode only) ──────────────────────────────────────
 if (SERVE_MODE) {
   document.getElementById('refresh-status').style.display = '';
-  let seenCount = ALERTS.length;
+
+  // Track latest alert by timestamp so we detect new alerts even if count stays same
+  let latestTs = ALERTS.length ? ALERTS[ALERTS.length - 1].timestamp : '';
   let countdown = POLL_INTERVAL;
 
   function buildAlertHTML(alertList) {
@@ -570,16 +578,17 @@ if (SERVE_MODE) {
         <div class="d-flex justify-content-between align-items-center">
           <div>
             ${bp(a.signal_type.toLowerCase(), a.signal_type)}
-            <span style="color:var(--muted);font-size:0.78rem;margin-left:8px">${a.timeframe} &nbsp; ${a.timestamp.slice(0,16).replace('T',' ')} UTC</span>
+            <span style="color:var(--muted);font-size:0.78rem;margin-left:8px">${a.timeframe} &nbsp; ${toIST(a.timestamp)}</span>
           </div>
           <span style="font-weight:700;color:${confColor(a.confidence_score)}">${a.confidence_score}/100</span>
         </div>
         <div style="margin-top:8px;font-size:0.85rem;">
-          <span style="color:var(--muted)">Entry</span> <b>$${parseFloat(a.entry_price).toLocaleString(undefined,{minimumFractionDigits:2})}</b>
+          <span style="color:var(--muted)">Entry</span> <b style="color:#ffffff">$${parseFloat(a.entry_price).toLocaleString(undefined,{minimumFractionDigits:2})}</b>
           &nbsp;&nbsp;<span style="color:var(--muted)">T1</span> <b class="win">$${parseFloat(a.target_1).toLocaleString(undefined,{minimumFractionDigits:2})}</b>
+          &nbsp;&nbsp;<span style="color:var(--muted)">T2</span> <b class="win">$${parseFloat(a.target_2||a.target_1).toLocaleString(undefined,{minimumFractionDigits:2})}</b>
           &nbsp;&nbsp;<span style="color:var(--muted)">SL</span> <b class="loss">$${parseFloat(a.stop_loss).toLocaleString(undefined,{minimumFractionDigits:2})}</b>
-          &nbsp;&nbsp;<span style="color:var(--muted)">R:R</span> <b>${a.risk_reward}x</b>
-          &nbsp;&nbsp;<span style="color:var(--muted);font-size:0.78rem">${a.oi_signal}</span>
+          &nbsp;&nbsp;<span style="color:var(--muted)">R:R</span> <b>${parseFloat(a.risk_reward||a.rr||0).toFixed(2)}x</b>
+          &nbsp;&nbsp;<span style="color:var(--muted);font-size:0.78rem">${a.oi_signal||''}</span>
         </div>
         <div style="margin-top:6px">${chips}</div>
       </div>`;
@@ -589,7 +598,7 @@ if (SERVE_MODE) {
   function showToast() {
     const t = document.getElementById('toast');
     t.style.display = '';
-    setTimeout(() => { t.style.display = 'none'; }, 4000);
+    setTimeout(() => { t.style.display = 'none'; }, 5000);
   }
 
   async function pollAlerts() {
@@ -597,31 +606,37 @@ if (SERVE_MODE) {
       const resp = await fetch('/api/alerts');
       if (!resp.ok) return;
       const fresh = await resp.json();
-      if (fresh.length !== seenCount) {
-        if (fresh.length > seenCount) showToast();
-        seenCount = fresh.length;
+      const newTs = fresh.length ? fresh[fresh.length - 1].timestamp : '';
+
+      // Update alerts panel whenever newest alert timestamp changes
+      if (newTs !== latestTs) {
+        if (fresh.length > 0 && newTs > latestTs) showToast();
+        latestTs = newTs;
         document.getElementById('alertsSection').style.display = '';
         document.getElementById('alert-count').textContent =
           fresh.length + ' alert' + (fresh.length !== 1 ? 's' : '') + ' recorded';
         document.getElementById('alertsList').innerHTML = buildAlertHTML(fresh);
       }
       document.getElementById('refresh-status').textContent =
-        'Last refreshed ' + new Date().toLocaleTimeString();
+        'Alerts updated ' + new Date().toLocaleTimeString();
     } catch(e) { /* server may be busy */ }
     countdown = POLL_INTERVAL;
   }
 
-  // Countdown ticker (every 1 s)
+  // Countdown ticker every 1 s
   setInterval(() => {
     countdown = Math.max(0, countdown - 1);
-    const el = document.getElementById('refresh-status');
-    if (countdown > 0) {
-      el.textContent = 'Next refresh in ' + countdown + 's';
-    }
+    document.getElementById('refresh-status').textContent =
+      countdown > 0 ? 'Next alert check in ' + countdown + 's'
+                    : 'Checking alerts...';
   }, 1000);
 
-  // Poll on interval
+  // Poll alerts on interval
   setInterval(pollAlerts, POLL_INTERVAL * 1000);
+  pollAlerts(); // run immediately on load
+
+  // Auto full-page reload every 5 min to refresh stats, charts, and trades table
+  setTimeout(() => location.reload(), 5 * 60 * 1000);
 }
 </script>
 </body>
@@ -651,8 +666,8 @@ def generate_html(
 # HTTP Server (serve mode)
 # ---------------------------------------------------------------------------
 
-def make_handler(html: str, alerts_path: str):
-    """Return a request handler class bound to the dashboard html and alerts path."""
+def make_handler(alerts_path: str, backtest_path: str, poll_interval: int):
+    """Return a request handler that regenerates the dashboard on every page load."""
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, fmt, *args):
@@ -668,7 +683,13 @@ def make_handler(html: str, alerts_path: str):
 
         def do_GET(self):
             if self.path in ("/", "/index.html"):
-                self._send(200, "text/html; charset=utf-8", html.encode("utf-8"))
+                # Re-read ALL data on every page load so stats/charts are always fresh
+                trades = read_backtest_csv(backtest_path)
+                alerts = read_alerts_jsonl(alerts_path)
+                stats  = compute_stats(trades) if trades else {}
+                fresh  = generate_html(stats, trades, alerts,
+                                       serve_mode=True, poll_interval=poll_interval)
+                self._send(200, "text/html; charset=utf-8", fresh.encode("utf-8"))
 
             elif self.path == "/api/alerts":
                 alerts = read_alerts_jsonl(alerts_path)
@@ -681,11 +702,12 @@ def make_handler(html: str, alerts_path: str):
     return Handler
 
 
-def serve(html: str, alerts_path: str, port: int) -> None:
-    handler = make_handler(html, alerts_path)
+def serve(alerts_path: str, backtest_path: str, port: int, poll_interval: int) -> None:
+    handler = make_handler(alerts_path, backtest_path, poll_interval)
     server  = HTTPServer(("127.0.0.1", port), handler)
     url     = f"http://localhost:{port}/"
     print(f"Dashboard server -> {url}  (Ctrl+C to stop)")
+    print(f"Data refreshes on every page load. Alerts panel polls every {poll_interval}s.")
     threading.Timer(0.5, lambda: webbrowser.open(url)).start()
     try:
         server.serve_forever()
@@ -709,8 +731,8 @@ def main() -> None:
                         help="Start a live HTTP server instead of writing a static file")
     parser.add_argument("--port",      type=int, default=5000,
                         help="Port for --serve mode  (default: 5000)")
-    parser.add_argument("--interval",  type=int, default=60,
-                        help="Alert poll interval in seconds for --serve mode  (default: 60)")
+    parser.add_argument("--interval",  type=int, default=30,
+                        help="Alert poll interval in seconds for --serve mode  (default: 30)")
     args = parser.parse_args()
 
     trades = read_backtest_csv(args.backtest)
@@ -723,9 +745,7 @@ def main() -> None:
     stats  = compute_stats(trades)
 
     if args.serve:
-        html = generate_html(stats, trades, alerts,
-                             serve_mode=True, poll_interval=args.interval)
-        serve(html, args.alerts, args.port)
+        serve(args.alerts, args.backtest, args.port, args.interval)
     else:
         html = generate_html(stats, trades, alerts)
         out  = Path(args.out).resolve()

@@ -92,6 +92,19 @@ CONFIG: dict = {
     #   Linux:    export TELEGRAM_TOKEN=...    &&  export TELEGRAM_CHAT_ID=...
     "telegram_token":   os.getenv("TELEGRAM_TOKEN",   ""),
     "telegram_chat_id": os.getenv("TELEGRAM_CHAT_ID", ""),
+
+    # ── WhatsApp Notifications (via CallMeBot – free) ─────────────────────
+    # Setup (one-time, 2 minutes):
+    #   1. Save +34 644 50 66 77 in your phone contacts (name it anything).
+    #   2. Send this WhatsApp message to that number:
+    #        I allow callmebot to send me messages
+    #   3. You'll receive your API key via WhatsApp instantly.
+    #   4. Set env vars:
+    #        Windows:  set WHATSAPP_PHONE=919876543210  (country code + number, no +)
+    #                  set WHATSAPP_APIKEY=1234567
+    #        Linux:    export WHATSAPP_PHONE=...  &&  export WHATSAPP_APIKEY=...
+    "whatsapp_phone":  os.getenv("WHATSAPP_PHONE",  ""),
+    "whatsapp_apikey": os.getenv("WHATSAPP_APIKEY", ""),
 }
 
 
@@ -764,7 +777,79 @@ class TelegramNotifier:
 
 
 # ---------------------------------------------------------------------------
-# 7. Main Scanner Orchestrator
+# 7. WhatsApp Notifier (CallMeBot – free, no account needed)
+# ---------------------------------------------------------------------------
+class WhatsAppNotifier:
+    """
+    Sends trade alerts via WhatsApp using the free CallMeBot gateway.
+    No Meta/WhatsApp Business account required.
+
+    Setup (one-time, ~2 minutes)
+    ----------------------------
+    1. Save +34 644 50 66 77 in your phone contacts.
+    2. Send this WhatsApp message to that number:
+         I allow callmebot to send me messages
+    3. You'll receive your API key instantly via WhatsApp.
+    4. Set env vars before launching the scanner:
+         Windows:  set WHATSAPP_PHONE=919876543210
+                   set WHATSAPP_APIKEY=1234567
+         Linux:    export WHATSAPP_PHONE=...  &&  export WHATSAPP_APIKEY=...
+    Note: Phone must include country code, no + or spaces (e.g. 919876543210).
+    """
+
+    _SEND_URL = "https://api.callmebot.com/whatsapp.php"
+
+    def __init__(self, phone: str, apikey: str) -> None:
+        self._phone   = phone.strip().lstrip("+")
+        self._apikey  = apikey.strip()
+        self._enabled = bool(self._phone and self._apikey)
+        if self._enabled:
+            log.info("WhatsApp notifications enabled.")
+        else:
+            log.info("WhatsApp notifications disabled (WHATSAPP_PHONE/APIKEY not set).")
+
+    async def send(self, alert: TradeAlert) -> None:
+        if not self._enabled:
+            return
+        text = self._format(alert)
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    self._SEND_URL,
+                    params={"phone": self._phone, "text": text, "apikey": self._apikey},
+                    timeout=aiohttp.ClientTimeout(total=15),
+                ) as resp:
+                    if resp.status != 200:
+                        body = await resp.text()
+                        log.warning(f"WhatsApp API error {resp.status}: {body[:120]}")
+        except Exception as exc:
+            log.warning(f"WhatsApp send failed: {exc}")
+
+    @staticmethod
+    def _format(alert: TradeAlert) -> str:
+        direction = alert.signal_type
+        arrow     = "▲ LONG" if direction == "LONG" else "▼ SHORT"
+        bd        = alert.indicator_breakdown
+        checks    = " ".join(
+            ("✓" if v.get("aligned") else "✗") + k.upper()
+            for k, v in bd.items() if isinstance(v, dict)
+        )
+        return (
+            f"[BTC/USDT] {arrow} | {alert.timeframe}\n"
+            f"Confidence: {alert.confidence_score:.0f}/100\n\n"
+            f"Entry:    ${alert.entry_price:,.2f}\n"
+            f"Target 1: ${alert.target_1:,.2f}\n"
+            f"Target 2: ${alert.target_2:,.2f}\n"
+            f"Stop:     ${alert.stop_loss:,.2f}\n"
+            f"R:R:      {alert.risk_reward:.2f}x\n"
+            f"OI:       {alert.oi_signal}\n\n"
+            f"{checks}\n"
+            f"{alert.timestamp[:16].replace('T', ' ')} UTC"
+        )
+
+
+# ---------------------------------------------------------------------------
+# 8. Main Scanner Orchestrator
 # ---------------------------------------------------------------------------
 class BTCFuturesScanner:
     """
@@ -782,6 +867,10 @@ class BTCFuturesScanner:
         self._telegram  = TelegramNotifier(
             cfg.get("telegram_token",   ""),
             cfg.get("telegram_chat_id", ""),
+        )
+        self._whatsapp  = WhatsAppNotifier(
+            cfg.get("whatsapp_phone",  ""),
+            cfg.get("whatsapp_apikey", ""),
         )
         self._last_alert: Dict[str, float] = {}   # tf → epoch of last alert
 
@@ -811,6 +900,7 @@ class BTCFuturesScanner:
         self._formatter.display(alert)
         self._formatter.save(alert)
         await self._telegram.send(alert)
+        await self._whatsapp.send(alert)
 
     # ── Entry ─────────────────────────────────────────────────────────────
 
