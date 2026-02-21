@@ -20,6 +20,9 @@ echo "Starting Dashboard on port $PORT ..."
 python -u dashboard.py --serve --port "$PORT" --interval 30 &
 DASHBOARD_PID=$!
 
-# If either process exits, kill the other and exit
-wait -n
-kill $SCANNER_PID $DASHBOARD_PID 2>/dev/null
+# Container lifecycle is tied to the dashboard (the HTTP health-check process).
+# If the scanner crashes, it restarts itself via infinite retry — the dashboard
+# keeps running so Koyeb's health check keeps passing.
+# Only exit (triggering a Koyeb restart) if the dashboard itself dies.
+wait $DASHBOARD_PID
+kill $SCANNER_PID 2>/dev/null

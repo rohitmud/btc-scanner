@@ -724,6 +724,10 @@ def make_handler(alerts_path: str, backtest_path: str, poll_interval: int):
                 all_alerts = read_alerts_jsonl(alerts_path)
                 last_alert = all_alerts[-1].get("timestamp") if all_alerts else None
 
+                # Last error written by scanner (if any)
+                err_path = Path("scanner_error.txt")
+                last_error = err_path.read_text().strip() if err_path.exists() else None
+
                 status = {
                     "server_time_utc":        now_utc,
                     "scanner_alive":          scanner_alive,
@@ -731,6 +735,7 @@ def make_handler(alerts_path: str, backtest_path: str, poll_interval: int):
                     "heartbeat_age_seconds":  age_s,
                     "alerts_count":           len(all_alerts),
                     "last_alert_timestamp":   last_alert,
+                    "scanner_last_error":     last_error,
                 }
                 body = json.dumps(status, indent=2).encode("utf-8")
                 self._send(200, "application/json", body)

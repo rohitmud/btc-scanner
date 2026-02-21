@@ -181,26 +181,38 @@ class DataManager:
         self._rest = ccxt.binanceusdm(exchange_opts)
 
         log.info("Loading market structure …")
-        for attempt in range(5):
+        backoff = 5
+        attempt = 0
+        while True:
             try:
                 await self._ws.load_markets()
                 log.info("Market structure loaded.")
+                # Clear any previous error file on success
+                try:
+                    import os as _os; _os.remove("scanner_error.txt")
+                except OSError:
+                    pass
                 break
             except Exception as exc:
-                if attempt < 4:
-                    log.warning(f"load_markets attempt {attempt+1} failed: {exc} – retrying in 5s …")
-                    await asyncio.sleep(5)
-                else:
-                    raise
+                attempt += 1
+                wait = min(backoff * (2 ** min(attempt - 1, 4)), 120)  # cap at 120s
+                log.warning(f"load_markets attempt {attempt} failed: {exc} – retrying in {wait}s …")
+                try:
+                    with open("scanner_error.txt", "w") as _ef:
+                        _ef.write(f"{datetime.now(timezone.utc).isoformat()} | load_markets failed: {exc}")
+                except OSError:
+                    pass
+                await asyncio.sleep(wait)
 
         log.info("Pre-fetching historical OHLCV …")
         await asyncio.gather(*[self._prefetch(tf) for tf in self._tfs])
         log.info("Historical data loaded.")
 
     async def _prefetch(self, tf: str) -> None:
-        """REST fetch with exponential-backoff retry."""
-        cfg = self._cfg
-        for attempt in range(cfg["rate_limit_retries"]):
+        """REST fetch with infinite exponential-backoff retry (never crashes)."""
+        attempt = 0
+        while True:
+            attempt += 1
             try:
                 rows = self._rest.fetch_ohlcv(
                     self._symbol, tf, limit=self._lookback
@@ -209,13 +221,18 @@ class DataManager:
                 log.info(f"  [{tf}] loaded {len(rows)} candles.")
                 return
             except ccxt.RateLimitExceeded:
-                wait = cfg["rate_limit_backoff"] ** attempt
+                wait = min(self._cfg["rate_limit_backoff"] ** attempt, 60)
                 log.warning(f"  [{tf}] rate-limit – retry in {wait:.1f}s …")
                 await asyncio.sleep(wait)
-            except ccxt.NetworkError as exc:
-                log.error(f"  [{tf}] network error: {exc}")
-                await asyncio.sleep(3)
-        log.error(f"  [{tf}] prefetch failed after all retries.")
+            except Exception as exc:
+                wait = min(5 * attempt, 60)
+                log.error(f"  [{tf}] prefetch attempt {attempt} failed: {exc} – retry in {wait}s …")
+                try:
+                    with open("scanner_error.txt", "w") as _ef:
+                        _ef.write(f"{datetime.now(timezone.utc).isoformat()} | prefetch [{tf}] failed: {exc}")
+                except OSError:
+                    pass
+                await asyncio.sleep(wait)
 
     # ── Streaming ────────────────────────────────────────────────────────
 
