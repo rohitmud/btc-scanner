@@ -161,6 +161,22 @@ class DataManager:
         self._oi_prev:    float = 0.0
         self._oi_last_ts: float = 0.0
 
+        # Funding Rate cache (5-min TTL)
+        self._funding_rate: float = 0.0
+        self._funding_ts:   float = 0.0
+
+        # Fear & Greed cache (4-hour TTL)
+        self._fear_greed:    int   = 50
+        self._fear_greed_ts: float = 0.0
+
+        # Taker Buy/Sell Ratio cache (5-min TTL)
+        self._taker_ratio: float = 1.0
+        self._taker_ts:    float = 0.0
+
+        # Long/Short Ratio cache (5-min TTL)
+        self._ls_ratio: float = 1.0
+        self._ls_ts:    float = 0.0
+
     # ── Initialisation ───────────────────────────────────────────────────
 
     async def initialize(self) -> None:
@@ -377,6 +393,83 @@ class DataManager:
                 return self._oi_now, self._oi_prev
         return self._oi_now, self._oi_prev
 
+    async def fetch_funding_rate(self) -> float:
+        """Returns current BTC perpetual funding rate. Cached 5 min."""
+        now = time.time()
+        if now - self._funding_ts < 300:
+            return self._funding_rate
+        try:
+            data = await asyncio.wait_for(
+                self._ws.fetch_funding_rate(self._symbol),
+                timeout=10,
+            )
+            self._funding_rate = float(data.get("fundingRate", 0) or 0)
+            self._funding_ts   = now
+        except Exception as exc:
+            log.debug(f"Funding rate fetch failed: {exc}")
+        return self._funding_rate
+
+    async def fetch_fear_greed(self) -> int:
+        """Returns Fear & Greed index (0–100). Cached 4 hours."""
+        now = time.time()
+        if now - self._fear_greed_ts < 14400:
+            return self._fear_greed
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    "https://api.alternative.me/fng/?limit=1",
+                    timeout=aiohttp.ClientTimeout(total=10),
+                ) as resp:
+                    if resp.status == 200:
+                        body = await resp.json(content_type=None)
+                        self._fear_greed    = int(body["data"][0]["value"])
+                        self._fear_greed_ts = now
+        except Exception as exc:
+            log.debug(f"Fear & Greed fetch failed: {exc}")
+        return self._fear_greed
+
+    async def fetch_taker_ratio(self) -> float:
+        """Returns taker buy/sell volume ratio. Cached 5 min."""
+        now = time.time()
+        if now - self._taker_ts < 300:
+            return self._taker_ratio
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    "https://fapi.binance.com/futures/data/takerlongshortRatio",
+                    params={"symbol": "BTCUSDT", "period": "5m", "limit": 1},
+                    timeout=aiohttp.ClientTimeout(total=10),
+                ) as resp:
+                    if resp.status == 200:
+                        body = await resp.json()
+                        if body:
+                            self._taker_ratio = float(body[0]["buySellRatio"])
+                            self._taker_ts    = now
+        except Exception as exc:
+            log.debug(f"Taker ratio fetch failed: {exc}")
+        return self._taker_ratio
+
+    async def fetch_long_short_ratio(self) -> float:
+        """Returns global long/short account ratio. Cached 5 min."""
+        now = time.time()
+        if now - self._ls_ts < 300:
+            return self._ls_ratio
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    "https://fapi.binance.com/futures/data/globalLongShortAccountRatio",
+                    params={"symbol": "BTCUSDT", "period": "5m", "limit": 1},
+                    timeout=aiohttp.ClientTimeout(total=10),
+                ) as resp:
+                    if resp.status == 200:
+                        body = await resp.json()
+                        if body:
+                            self._ls_ratio = float(body[0]["longShortRatio"])
+                            self._ls_ts    = now
+        except Exception as exc:
+            log.debug(f"Long/Short ratio fetch failed: {exc}")
+        return self._ls_ratio
+
     async def close(self) -> None:
         if self._ws:
             await self._ws.close()
@@ -455,6 +548,12 @@ class TechnicalAnalyzer:
         # ── OBV ─────────────────────────────────────────────────────────
         df.ta.obv(append=True)
 
+        # ── ADX ─────────────────────────────────────────────────────────
+        df.ta.adx(length=14, append=True)
+        adx_col = self._find_col(df, "ADX_")
+        dmp_col = self._find_col(df, "DMP_")
+        dmn_col = self._find_col(df, "DMN_")
+
         # ── Extract scalars ──────────────────────────────────────────────
         last = df.iloc[-1]
         prev = df.iloc[-2]
@@ -522,6 +621,11 @@ class TechnicalAnalyzer:
             # OBV
             "obv_slope":        obv_slope,
 
+            # ADX (trend strength + directional movement)
+            "adx":       float(last[adx_col]) if adx_col and not np.isnan(last[adx_col]) else 0.0,
+            "adx_plus":  float(last[dmp_col]) if dmp_col and not np.isnan(last[dmp_col]) else 0.0,
+            "adx_minus": float(last[dmn_col]) if dmn_col and not np.isnan(last[dmn_col]) else 0.0,
+
             # Swing context (for Fib targets)
             "swing_high":       swing_high,
             "swing_low":        swing_low,
@@ -575,9 +679,12 @@ class SignalGenerator:
     """
 
     # Original base weights – never modified; used as clamp reference by WeightLearner
+    # 12 indicators, sum = 100
     _BASE_WEIGHTS = {
-        "vwap": 20, "ema": 20, "macd": 15,
-        "rsi":  15, "bb":  10, "obv":  10, "oi": 10,
+        "vwap": 14, "ema": 14, "macd": 11, "rsi": 11,
+        "bb":    7, "obv":  7, "oi":    6,
+        "funding": 10, "adx": 7, "fear_greed": 3,
+        "taker_ratio": 5, "ls_ratio": 5,
     }
 
     def __init__(self, cfg: dict) -> None:
@@ -593,10 +700,14 @@ class SignalGenerator:
 
     def evaluate(
         self,
-        ind:      dict,
-        tf:       str,
-        oi_now:   float,
-        oi_prev:  float,
+        ind:          dict,
+        tf:           str,
+        oi_now:       float,
+        oi_prev:      float,
+        funding_rate: float = 0.0,
+        fear_greed:   int   = 50,
+        taker_ratio:  float = 1.0,
+        ls_ratio:     float = 1.0,
     ) -> Optional[TradeAlert]:
         """
         Run entry conditions.  Returns a TradeAlert when confidence ≥
@@ -621,7 +732,10 @@ class SignalGenerator:
             return None
 
         direction          = "LONG" if long_entry else "SHORT"
-        score, breakdown   = self._score(ind, direction, oi_now, oi_prev)
+        score, breakdown   = self._score(
+            ind, direction, oi_now, oi_prev,
+            funding_rate, fear_greed, taker_ratio, ls_ratio,
+        )
 
         if score < self._cfg["confidence_threshold"]:
             return None
@@ -665,10 +779,14 @@ class SignalGenerator:
 
     def _score(
         self,
-        ind:       dict,
-        direction: str,
-        oi_now:    float,
-        oi_prev:   float,
+        ind:          dict,
+        direction:    str,
+        oi_now:       float,
+        oi_prev:      float,
+        funding_rate: float = 0.0,
+        fear_greed:   int   = 50,
+        taker_ratio:  float = 1.0,
+        ls_ratio:     float = 1.0,
     ) -> Tuple[float, dict]:
         W    = self._weights
         bull = direction == "LONG"
@@ -723,6 +841,55 @@ class SignalGenerator:
         oi_rising = oi_now > oi_prev if oi_prev > 0 else False
         oi_ok     = oi_rising if bull else not oi_rising
         pts["oi"] = W["oi"] if oi_ok else 0
+
+        # 8. Funding Rate – avoid entering when crowd is crowded in our direction
+        # Positive funding → longs pay shorts (crowd is long → contrarian caution for LONG)
+        # Threshold ±0.05% per 8h: beyond this the trade is overcrowded
+        _FUND_THRESH = 0.0005
+        if bull:
+            funding_ok = funding_rate <= _FUND_THRESH   # not excessively crowded long
+        else:
+            funding_ok = funding_rate >= -_FUND_THRESH  # not excessively crowded short
+        pts["funding"] = W["funding"] if funding_ok else 0
+
+        # 9. ADX – confirms we are in a trending (not ranging) market
+        # ADX ≥ 25 = trending; DMP > DMN = bullish trend, DMN > DMP = bearish
+        adx_val = ind.get("adx", 0.0)
+        if adx_val >= 25:
+            adx_ok = (
+                ind.get("adx_plus", 0.0) > ind.get("adx_minus", 0.0)
+                if bull else
+                ind.get("adx_minus", 0.0) > ind.get("adx_plus", 0.0)
+            )
+        else:
+            adx_ok = False  # ranging market – no trend credit
+        pts["adx"] = W["adx"] if adx_ok else 0
+
+        # 10. Fear & Greed Index – avoid chasing extremes
+        # Extreme Greed (> 74) → LONG is overcrowded; Extreme Fear (< 25) → SHORT panic
+        if bull:
+            fg_ok = fear_greed <= 74
+        else:
+            fg_ok = fear_greed >= 25
+        pts["fear_greed"] = W["fear_greed"] if fg_ok else 0
+
+        # 11. Taker Buy/Sell Ratio – aggressive order flow in our direction
+        # > 1.15 = buyers are more aggressive → confirms LONG
+        # < 0.85 = sellers are more aggressive → confirms SHORT
+        if bull:
+            taker_ok = taker_ratio > 1.15
+        else:
+            taker_ok = taker_ratio < 0.85
+        pts["taker_ratio"] = W["taker_ratio"] if taker_ok else 0
+
+        # 12. Long/Short Ratio – contrarian retail-crowd signal
+        # Crowd heavily short (ratio < 0.9) → contrarian LONG opportunity
+        # Crowd heavily long  (ratio > 1.5) → contrarian SHORT opportunity
+        if bull:
+            ls_ok = ls_ratio < 0.9
+        else:
+            ls_ok = ls_ratio > 1.5
+        pts["ls_ratio"] = W["ls_ratio"] if ls_ok else 0
 
         total     = float(sum(pts.values()))
         breakdown = {
@@ -781,8 +948,10 @@ class WeightLearner:
     CLAMP_MAX_FRAC = 2.00   # ceiling: never above 200 % of base
 
     _BASE: Dict[str, float] = {
-        "vwap": 20, "ema": 20, "macd": 15,
-        "rsi":  15, "bb":  10, "obv":  10, "oi": 10,
+        "vwap": 14, "ema": 14, "macd": 11, "rsi": 11,
+        "bb":    7, "obv":  7, "oi":    6,
+        "funding": 10, "adx": 7, "fear_greed": 3,
+        "taker_ratio": 5, "ls_ratio": 5,
     }
     INDICATORS: List[str] = list(_BASE.keys())
 
@@ -1303,8 +1472,15 @@ class BTCFuturesScanner:
             return
 
         oi_now, oi_prev = await self._data.fetch_open_interest()
+        funding_rate    = await self._data.fetch_funding_rate()
+        fear_greed      = await self._data.fetch_fear_greed()
+        taker_ratio     = await self._data.fetch_taker_ratio()
+        ls_ratio        = await self._data.fetch_long_short_ratio()
 
-        alert = self._generator.evaluate(indicators, tf, oi_now, oi_prev)
+        alert = self._generator.evaluate(
+            indicators, tf, oi_now, oi_prev,
+            funding_rate, fear_greed, taker_ratio, ls_ratio,
+        )
         if alert is None:
             return
 
