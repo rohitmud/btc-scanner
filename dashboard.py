@@ -525,6 +525,20 @@ function renderTable() {
     `Showing ${filtered.length} of ${TRADES.length} trades`;
 }
 
+// ─── Leverage Recommendation Helper ──────────────────────────────────────
+function leverageRow(a) {
+  const lv = a.leverage_rec;
+  if (!lv) return '';
+  const badge = (label, val, color) =>
+    `<span style="background:${color};color:#000;font-weight:700;border-radius:4px;padding:1px 6px;font-size:0.75rem;margin-right:4px">${label} ${val}x</span>`;
+  return `<div style="margin-top:5px">` +
+    badge('Conservative', lv.conservative, '#4ade80') +
+    badge('Moderate',     lv.moderate,     '#facc15') +
+    badge('Aggressive',   lv.aggressive,   '#f97316') +
+    `<span style="color:var(--muted);font-size:0.72rem">&nbsp;SL ${lv.sl_distance_pct}% away &bull; liq &gt;${lv.max_theoretical}x</span>` +
+    `</div>`;
+}
+
 // ─── Signal Validity Helper ───────────────────────────────────────────────
 function validityRow(a) {
   if (!a.expires_at) return '';
@@ -579,6 +593,7 @@ function validityRow(a) {
         ${a.oi_signal ? `&nbsp;&nbsp;<span style="color:var(--muted);font-size:0.78rem">${a.oi_signal}</span>` : ''}
       </div>
       <div style="margin-top:6px">${chips}</div>
+      ${leverageRow(a)}
       ${validityRow(a)}
     </div>`;
   }).join('');

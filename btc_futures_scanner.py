@@ -129,6 +129,7 @@ class TradeAlert:
     timestamp:            str
     valid_for_minutes:    int    # practical validity window (based on timeframe)
     expires_at:           str    # UTC ISO timestamp when signal expires
+    leverage_rec:         dict   # {"conservative","moderate","aggressive","sl_pct","max_theoretical"}
     indicator_breakdown:  dict
 
     def to_json(self, indent: int = 2) -> str:
@@ -812,6 +813,7 @@ class SignalGenerator:
         now_utc       = datetime.now(timezone.utc)
         valid_minutes = self._VALIDITY.get(tf, 60)
         expires_at    = (now_utc + timedelta(minutes=valid_minutes)).isoformat()
+        leverage_rec  = self._calc_leverage(entry, stop_loss, score)
 
         return TradeAlert(
             symbol              = self._cfg["symbol"],
@@ -827,6 +829,7 @@ class SignalGenerator:
             timestamp           = now_utc.isoformat(),
             valid_for_minutes   = valid_minutes,
             expires_at          = expires_at,
+            leverage_rec        = leverage_rec,
             indicator_breakdown = breakdown,
         )
 
@@ -953,6 +956,66 @@ class SignalGenerator:
         }
         breakdown["total_score"] = total
         return total, breakdown
+
+    # Standard exchange leverage tiers (Binance, Bybit etc.)
+    _LEV_TIERS: List[int] = [2, 3, 5, 7, 10, 15, 20, 25]
+
+    @staticmethod
+    def _snap_leverage(value: float) -> int:
+        """Round DOWN to the nearest standard exchange leverage tier (min 2x)."""
+        tiers = [2, 3, 5, 7, 10, 15, 20, 25]
+        for t in reversed(tiers):
+            if value >= t:
+                return t
+        return 2
+
+    @staticmethod
+    def _calc_leverage(entry: float, stop_loss: float, confidence: float) -> dict:
+        """
+        Compute conservative / moderate / aggressive leverage tiers.
+
+        Formula
+        -------
+        sl_pct   = |entry − stop_loss| / entry            (e.g. 0.022 = 2.2%)
+        liq_max  = 1 / sl_pct                             (liquidation exactly at SL)
+        safe_max = 0.5 / sl_pct                           (50 % safety buffer:
+                                                            liquidation sits 50 % further
+                                                            out than the stop loss)
+
+        Confidence caps prevent recommending high leverage on weaker signals:
+          ≥ 90 → cap 25x  |  ≥ 85 → 20x  |  ≥ 80 → 15x  |  ≥ 75 → 10x  |  else → 5x
+
+        Three tiers (snapped to standard exchange values):
+          Conservative  = 30 % of capped safe_max  (stays open through normal noise)
+          Moderate      = 60 % of capped safe_max  (solid risk management)
+          Aggressive    = 100 % of capped safe_max (only for high-confidence setups)
+        """
+        sl_pct = abs(entry - stop_loss) / entry if entry > 0 else 0.02
+        sl_pct = max(sl_pct, 0.001)  # guard against zero
+
+        liq_max  = int(1.0 / sl_pct)           # theoretical max before liquidation
+        safe_max = 0.5 / sl_pct                # with 50 % buffer
+
+        # Confidence cap
+        if   confidence >= 90: conf_cap = 25
+        elif confidence >= 85: conf_cap = 20
+        elif confidence >= 80: conf_cap = 15
+        elif confidence >= 75: conf_cap = 10
+        else:                  conf_cap =  5
+
+        capped = min(safe_max, conf_cap, 25)
+
+        conservative = SignalGenerator._snap_leverage(max(2, capped * 0.30))
+        moderate     = SignalGenerator._snap_leverage(max(2, capped * 0.60))
+        aggressive   = SignalGenerator._snap_leverage(max(2, capped))
+
+        return {
+            "conservative":      conservative,
+            "moderate":          moderate,
+            "aggressive":        aggressive,
+            "sl_distance_pct":   round(sl_pct * 100, 2),
+            "max_theoretical":   liq_max,
+        }
 
     @staticmethod
     def _oi_label(direction: str, oi_now: float, oi_prev: float) -> str:
@@ -1158,6 +1221,16 @@ class AlertFormatter:
         print(f"  Confidence    : {alert.confidence_score:.1f} / 100")
         exp_str = alert.expires_at[:16].replace("T", " ") + " UTC"
         print(f"  Valid For     : ~{alert.valid_for_minutes} min  (until {exp_str})")
+        lv = alert.leverage_rec
+        print(
+            f"  Leverage Rec  :  Conservative {lv['conservative']}x"
+            f"  |  Moderate {lv['moderate']}x"
+            f"  |  Aggressive {lv['aggressive']}x"
+        )
+        print(
+            f"                   SL is {lv['sl_distance_pct']}% from entry"
+            f"  (liquidation at >{lv['max_theoretical']}x)"
+        )
         print(cls._BAR)
         print("  Indicator Breakdown:")
         bd = alert.indicator_breakdown
