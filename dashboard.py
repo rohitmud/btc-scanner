@@ -728,6 +728,27 @@ def make_handler(alerts_path: str, backtest_path: str, poll_interval: int):
                 err_path = Path("scanner_error.txt")
                 last_error = err_path.read_text().strip() if err_path.exists() else None
 
+                # Learned weights info (if self-learning has run)
+                lw_path = Path("learned_weights.json")
+                learned = None
+                if lw_path.exists():
+                    try:
+                        learned = json.loads(lw_path.read_text(encoding="utf-8"))
+                    except (json.JSONDecodeError, OSError):
+                        pass
+
+                # Outcomes count
+                oc_path = Path("outcomes.jsonl")
+                outcomes_count = 0
+                if oc_path.exists():
+                    try:
+                        outcomes_count = sum(
+                            1 for ln in oc_path.read_text(encoding="utf-8").splitlines()
+                            if ln.strip()
+                        )
+                    except OSError:
+                        pass
+
                 status = {
                     "server_time_utc":        now_utc,
                     "scanner_alive":          scanner_alive,
@@ -736,6 +757,8 @@ def make_handler(alerts_path: str, backtest_path: str, poll_interval: int):
                     "alerts_count":           len(all_alerts),
                     "last_alert_timestamp":   last_alert,
                     "scanner_last_error":     last_error,
+                    "outcomes_resolved":      outcomes_count,
+                    "learned_weights":        learned,
                 }
                 body = json.dumps(status, indent=2).encode("utf-8")
                 self._send(200, "application/json", body)

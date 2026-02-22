@@ -35,7 +35,8 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from collections import deque
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from typing import Dict, Optional, Tuple
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
 
 import aiohttp
 import ccxt
@@ -573,18 +574,22 @@ class SignalGenerator:
     marginal setups in back-testing).
     """
 
-    _WEIGHTS = {
-        "vwap":  20,
-        "ema":   20,
-        "macd":  15,
-        "rsi":   15,
-        "bb":    10,
-        "obv":   10,
-        "oi":    10,
+    # Original base weights – never modified; used as clamp reference by WeightLearner
+    _BASE_WEIGHTS = {
+        "vwap": 20, "ema": 20, "macd": 15,
+        "rsi":  15, "bb":  10, "obv":  10, "oi": 10,
     }
 
     def __init__(self, cfg: dict) -> None:
-        self._cfg = cfg
+        self._cfg     = cfg
+        self._weights = WeightLearner.load_weights()
+        source = "learned" if Path(WeightLearner.WEIGHTS_FILE).exists() else "default"
+        log.info(f"SignalGenerator: using {source} indicator weights — {self._weights}")
+
+    def reload_weights(self) -> None:
+        """Hot-reload weights from learned_weights.json (called after each learning cycle)."""
+        self._weights = WeightLearner.load_weights()
+        log.info(f"SignalGenerator: weights reloaded — {self._weights}")
 
     def evaluate(
         self,
@@ -665,7 +670,7 @@ class SignalGenerator:
         oi_now:    float,
         oi_prev:   float,
     ) -> Tuple[float, dict]:
-        W    = self._WEIGHTS
+        W    = self._weights
         bull = direction == "LONG"
         pts: dict = {}
 
@@ -746,7 +751,167 @@ class SignalGenerator:
 
 
 # ---------------------------------------------------------------------------
-# 5. Alert Formatter
+# 5. Weight Learner
+# ---------------------------------------------------------------------------
+class WeightLearner:
+    """
+    Adjusts SignalGenerator indicator weights based on resolved trade outcomes.
+
+    Algorithm  (conservative ±10 % per cycle, user-selected)
+    ----------------------------------------------------------
+    For each of the 7 indicators:
+      1. Count how often it was aligned on WIN vs LOSS trades.
+      2. Compute precision = wins_when_aligned / (wins + losses when aligned).
+      3. Compute lift = precision / overall_win_rate.
+         lift > 1 → indicator predicts well above baseline → increase weight.
+         lift < 1 → indicator adds noise → decrease weight.
+      4. Clamp delta to ± MAX_DELTA_FRAC × base_weight  (±10 % per cycle).
+      5. Hard bounds: weight stays in [30 %, 200 %] of its original base value.
+      6. Normalise all weights so they sum to exactly 100.
+
+    Requires MIN_SAMPLES resolved outcomes before first adjustment.
+    """
+
+    WEIGHTS_FILE   = "learned_weights.json"
+    OUTCOMES_FILE  = "outcomes.jsonl"
+    ALERTS_FILE    = "alerts.jsonl"
+    MIN_SAMPLES    = 20
+    MAX_DELTA_FRAC = 0.10   # ±10 % of base weight per cycle
+    CLAMP_MIN_FRAC = 0.30   # floor: never below 30 % of base
+    CLAMP_MAX_FRAC = 2.00   # ceiling: never above 200 % of base
+
+    _BASE: Dict[str, float] = {
+        "vwap": 20, "ema": 20, "macd": 15,
+        "rsi":  15, "bb":  10, "obv":  10, "oi": 10,
+    }
+    INDICATORS: List[str] = list(_BASE.keys())
+
+    # ── Public API ────────────────────────────────────────────────────────
+
+    @classmethod
+    def load_weights(cls) -> Dict[str, float]:
+        """Load learned weights from file; fall back to base defaults."""
+        try:
+            with open(cls.WEIGHTS_FILE, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+            w = data.get("weights", {})
+            if set(w.keys()) == set(cls._BASE.keys()):
+                return {k: float(v) for k, v in w.items()}
+        except (FileNotFoundError, json.JSONDecodeError, KeyError):
+            pass
+        return dict(cls._BASE)
+
+    @classmethod
+    def run_update(cls, current_weights: Dict[str, float]) -> Optional[Dict[str, float]]:
+        """
+        Run one learning cycle.  Returns new weights dict if update happened,
+        else None (not enough data or I/O error).
+        """
+        # ── load outcomes ────────────────────────────────────────────────
+        outcomes: Dict[str, str] = {}   # timestamp → 'WIN'|'LOSS'
+        try:
+            with open(cls.OUTCOMES_FILE, "r", encoding="utf-8") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if line:
+                        rec = json.loads(line)
+                        outcomes[rec["timestamp"]] = rec["outcome"]
+        except FileNotFoundError:
+            return None
+
+        # ── join with alerts to get indicator_breakdown ──────────────────
+        resolved: List[Dict] = []
+        try:
+            with open(cls.ALERTS_FILE, "r", encoding="utf-8") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    alert = json.loads(line)
+                    outcome = outcomes.get(alert.get("timestamp", ""))
+                    if outcome in ("WIN", "LOSS"):
+                        resolved.append({
+                            "outcome":   outcome,
+                            "breakdown": alert.get("indicator_breakdown", {}),
+                        })
+        except FileNotFoundError:
+            return None
+
+        if len(resolved) < cls.MIN_SAMPLES:
+            log.info(
+                f"WeightLearner: {len(resolved)}/{cls.MIN_SAMPLES} resolved trades "
+                f"– skipping update."
+            )
+            return None
+
+        # ── compute per-indicator lift ───────────────────────────────────
+        total_wins = sum(1 for r in resolved if r["outcome"] == "WIN")
+        total_res  = len(resolved)
+        base_rate  = total_wins / total_res if total_res else 0.5
+
+        new_weights: Dict[str, float] = {}
+        for ind in cls.INDICATORS:
+            wins_al  = sum(
+                1 for r in resolved
+                if r["outcome"] == "WIN" and r["breakdown"].get(ind, {}).get("aligned", False)
+            )
+            losses_al = sum(
+                1 for r in resolved
+                if r["outcome"] == "LOSS" and r["breakdown"].get(ind, {}).get("aligned", False)
+            )
+            total_al = wins_al + losses_al
+
+            if total_al < 5:
+                # Too few aligned samples for this indicator – keep current
+                new_weights[ind] = current_weights.get(ind, cls._BASE[ind])
+                continue
+
+            precision = wins_al / total_al
+            lift      = precision / max(0.01, base_rate)
+
+            base_w  = cls._BASE[ind]
+            cur_w   = current_weights.get(ind, base_w)
+            target  = cur_w * lift
+            delta   = max(-cls.MAX_DELTA_FRAC * base_w,
+                          min( cls.MAX_DELTA_FRAC * base_w, target - cur_w))
+            raw     = cur_w + delta
+            new_weights[ind] = max(cls.CLAMP_MIN_FRAC * base_w,
+                                   min(cls.CLAMP_MAX_FRAC * base_w, raw))
+
+        # ── normalise to 100 ─────────────────────────────────────────────
+        total = sum(new_weights.values())
+        norm  = {k: round(v / total * 100, 2) for k, v in new_weights.items()}
+
+        # ── log changes ──────────────────────────────────────────────────
+        changes = [
+            f"{k}: {current_weights.get(k, cls._BASE[k]):.1f}→{norm[k]:.1f}"
+            for k in cls.INDICATORS
+            if abs(norm[k] - current_weights.get(k, cls._BASE[k])) > 0.05
+        ]
+        log.info(
+            f"WeightLearner: updated weights  samples={len(resolved)}"
+            f"  win_rate={base_rate:.1%}"
+            + (f"  changes=[{', '.join(changes)}]" if changes else "  (no significant change)")
+        )
+
+        # ── persist ──────────────────────────────────────────────────────
+        try:
+            with open(cls.WEIGHTS_FILE, "w", encoding="utf-8") as fh:
+                json.dump({
+                    "weights":      norm,
+                    "base_weights": cls._BASE,
+                    "samples":      len(resolved),
+                    "win_rate":     round(base_rate, 4),
+                    "updated":      datetime.now(timezone.utc).isoformat(),
+                }, fh, indent=2)
+        except OSError as exc:
+            log.warning(f"WeightLearner: could not save {cls.WEIGHTS_FILE}: {exc}")
+
+        return norm
+
+
+# ---------------------------------------------------------------------------
+# 6. Alert Formatter
 # ---------------------------------------------------------------------------
 class AlertFormatter:
     """Pretty-prints alerts to stdout and appends raw JSON to a JSONL file."""
@@ -943,7 +1108,166 @@ class WhatsAppNotifier:
 
 
 # ---------------------------------------------------------------------------
-# 8. Main Scanner Orchestrator
+# 8. Outcome Tracker
+# ---------------------------------------------------------------------------
+class OutcomeTracker:
+    """
+    Background asyncio task that resolves live alert outcomes and triggers
+    weight learning after each batch.
+
+    Every CHECK_INTERVAL seconds it:
+      1. Reads alerts.jsonl for unresolved alerts (not yet in outcomes.jsonl).
+      2. Skips alerts < MIN_AGE_SECS old (not enough subsequent bars yet).
+      3. Fetches OHLCV bars from the alert timestamp forward via REST.
+      4. Scans bars for the first T1 or SL touch:
+           LONG : high >= target_1 → WIN ;  low  <= stop_loss → LOSS
+           SHORT: low  <= target_1 → WIN ;  high >= stop_loss → LOSS
+           Both in same bar → LOSS  (conservative)
+           Neither in MAX_HOLD bars → OPEN  (retry next cycle)
+      5. Appends resolved outcomes to outcomes.jsonl.
+      6. After any new resolutions, calls WeightLearner.run_update() and
+         reloads weights into the SignalGenerator.
+    """
+
+    OUTCOMES_FILE  = "outcomes.jsonl"
+    ALERTS_FILE    = "alerts.jsonl"
+    CHECK_INTERVAL = 300    # seconds between cycles (5 min)
+    MIN_AGE_SECS   = 1800   # ignore alerts < 30 min old
+    MAX_HOLD       = 50     # maximum forward bars to scan
+
+    def __init__(self, data: DataManager, generator: "SignalGenerator") -> None:
+        self._data      = data
+        self._generator = generator
+
+    async def track(self) -> None:
+        """Run forever; called as a concurrent asyncio task alongside poll streams."""
+        log.info("OutcomeTracker started – resolving alert outcomes every 5 min.")
+        await asyncio.sleep(90)   # warm-up delay
+        while True:
+            try:
+                new_resolved = await self._resolve_cycle()
+                if new_resolved > 0:
+                    updated = WeightLearner.run_update(self._generator._weights)
+                    if updated:
+                        self._generator.reload_weights()
+            except Exception as exc:
+                log.error(f"OutcomeTracker cycle error: {exc}", exc_info=True)
+            await asyncio.sleep(self.CHECK_INTERVAL)
+
+    # ── Internal ──────────────────────────────────────────────────────────
+
+    async def _resolve_cycle(self) -> int:
+        """Resolve pending alerts; return count of newly resolved outcomes."""
+        # Load already-resolved timestamps
+        resolved_ts: set = set()
+        try:
+            with open(self.OUTCOMES_FILE, "r", encoding="utf-8") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if line:
+                        resolved_ts.add(json.loads(line)["timestamp"])
+        except FileNotFoundError:
+            pass
+
+        # Load all alerts
+        alerts: List[Dict] = []
+        try:
+            with open(self.ALERTS_FILE, "r", encoding="utf-8") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if line:
+                        try:
+                            alerts.append(json.loads(line))
+                        except json.JSONDecodeError:
+                            pass
+        except FileNotFoundError:
+            return 0
+
+        now_utc      = datetime.now(timezone.utc)
+        new_resolved = 0
+
+        for alert in alerts:
+            ts = alert.get("timestamp", "")
+            if ts in resolved_ts:
+                continue
+
+            try:
+                age_s = (now_utc - datetime.fromisoformat(ts)).total_seconds()
+            except ValueError:
+                continue
+            if age_s < self.MIN_AGE_SECS:
+                continue   # too fresh
+
+            tf        = alert.get("timeframe", "5m")
+            direction = alert.get("signal_type", "LONG")
+            entry     = float(alert.get("entry_price", 0))
+            target_1  = float(alert.get("target_1", 0))
+            stop_loss = float(alert.get("stop_loss", 0))
+            if not all([entry, target_1, stop_loss]):
+                continue
+
+            outcome = await self._fetch_outcome(ts, tf, direction, target_1, stop_loss)
+            if outcome == "OPEN":
+                continue   # not yet resolved
+
+            try:
+                with open(self.OUTCOMES_FILE, "a", encoding="utf-8") as fh:
+                    fh.write(json.dumps({
+                        "timestamp":   ts,
+                        "outcome":     outcome,
+                        "resolved_at": now_utc.isoformat(),
+                        "timeframe":   tf,
+                        "direction":   direction,
+                    }) + "\n")
+                resolved_ts.add(ts)
+                new_resolved += 1
+                log.info(f"OutcomeTracker: {direction} [{tf}] @ {ts[:16]} → {outcome}")
+            except OSError as exc:
+                log.warning(f"OutcomeTracker: write failed: {exc}")
+
+        if new_resolved:
+            log.info(f"OutcomeTracker: {new_resolved} new outcome(s) resolved this cycle.")
+        return new_resolved
+
+    async def _fetch_outcome(
+        self, ts: str, tf: str, direction: str, target_1: float, stop_loss: float,
+    ) -> str:
+        """Return 'WIN', 'LOSS', or 'OPEN' by scanning forward OHLCV from ts."""
+        try:
+            since_ms = int(datetime.fromisoformat(ts).timestamp() * 1000)
+            candles  = await asyncio.wait_for(
+                self._data._ws.fetch_ohlcv(
+                    self._data._symbol, tf,
+                    since=since_ms, limit=self.MAX_HOLD + 2,
+                ),
+                timeout=20,
+            )
+        except Exception as exc:
+            log.debug(f"OutcomeTracker: fetch failed for {ts[:16]}: {exc}")
+            return "OPEN"
+
+        # Skip first bar (entry bar), scan subsequent bars
+        for c in candles[1:]:
+            hi, lo = float(c[2]), float(c[3])
+            if direction == "LONG":
+                hit_t1 = hi >= target_1
+                hit_sl = lo <= stop_loss
+            else:
+                hit_t1 = lo <= target_1
+                hit_sl = hi >= stop_loss
+
+            if hit_t1 and hit_sl:
+                return "LOSS"   # conservative: assume SL hit first
+            if hit_t1:
+                return "WIN"
+            if hit_sl:
+                return "LOSS"
+
+        return "OPEN"   # not resolved yet
+
+
+# ---------------------------------------------------------------------------
+# 9. Main Scanner Orchestrator
 # ---------------------------------------------------------------------------
 class BTCFuturesScanner:
     """
@@ -966,7 +1290,8 @@ class BTCFuturesScanner:
             cfg.get("whatsapp_phone",  ""),
             cfg.get("whatsapp_apikey", ""),
         )
-        self._last_alert: Dict[str, float] = {}   # tf → epoch of last alert
+        self._last_alert:     Dict[str, float] = {}   # tf → epoch of last alert
+        self._outcome_tracker = OutcomeTracker(self._data, self._generator)
 
     # ── Pipeline ─────────────────────────────────────────────────────────
 
@@ -1010,7 +1335,7 @@ class BTCFuturesScanner:
             for tf in self._cfg["timeframes"]
         ]
         try:
-            await asyncio.gather(*streams)
+            await asyncio.gather(*streams, self._outcome_tracker.track())
         finally:
             await self._data.close()
             log.info("Scanner shut down cleanly.")
