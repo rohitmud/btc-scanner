@@ -309,7 +309,17 @@ class DataManager:
                     df = self._to_dataframe(tf)
                     if df is not None:
                         try:
-                            await callback(tf, df)
+                            await asyncio.wait_for(callback(tf, df), timeout=30)
+                        except asyncio.TimeoutError:
+                            log.warning(f"[{tf}] _on_candle timed out after 30s – skipping bar")
+                            try:
+                                with open("scanner_error.txt", "w") as _ef:
+                                    _ef.write(
+                                        f"{datetime.now(timezone.utc).isoformat()} "
+                                        f"| [{tf}] _on_candle timeout"
+                                    )
+                            except OSError:
+                                pass
                         except Exception as cb_exc:
                             log.error(f"[{tf}] analysis error: {cb_exc}", exc_info=True)
                             try:
@@ -471,6 +481,31 @@ class DataManager:
         except Exception as exc:
             log.debug(f"Long/Short ratio fetch failed: {exc}")
         return self._ls_ratio
+
+    async def refresh_market_data(self) -> None:
+        """
+        Background task: keeps funding-rate, fear/greed, taker-ratio and
+        long/short-ratio caches warm by refreshing them every 5 minutes.
+
+        Running this as a separate task means _on_candle never has to wait
+        for an external API call; it always reads the already-cached value.
+        Any individual fetch failure is silently ignored (cached default used).
+        """
+        log.info("Market-data refresher started (funding, fear/greed, taker, L/S).")
+        while True:
+            results = await asyncio.gather(
+                self.fetch_funding_rate(),
+                self.fetch_fear_greed(),
+                self.fetch_taker_ratio(),
+                self.fetch_long_short_ratio(),
+                return_exceptions=True,
+            )
+            for name, result in zip(
+                ["funding_rate", "fear_greed", "taker_ratio", "ls_ratio"], results
+            ):
+                if isinstance(result, Exception):
+                    log.debug(f"refresh_market_data [{name}] failed: {result}")
+            await asyncio.sleep(300)
 
     async def close(self) -> None:
         if self._ws:
@@ -1498,10 +1533,12 @@ class BTCFuturesScanner:
             return
 
         oi_now, oi_prev = await self._data.fetch_open_interest()
-        funding_rate    = await self._data.fetch_funding_rate()
-        fear_greed      = await self._data.fetch_fear_greed()
-        taker_ratio     = await self._data.fetch_taker_ratio()
-        ls_ratio        = await self._data.fetch_long_short_ratio()
+        # Funding/sentiment/flow data is kept warm by refresh_market_data()
+        # background task — read from cache synchronously (no awaiting, no risk of hanging).
+        funding_rate = self._data._funding_rate
+        fear_greed   = self._data._fear_greed
+        taker_ratio  = self._data._taker_ratio
+        ls_ratio     = self._data._ls_ratio
 
         alert = self._generator.evaluate(
             indicators, tf, oi_now, oi_prev,
@@ -1537,7 +1574,11 @@ class BTCFuturesScanner:
             for tf in self._cfg["timeframes"]
         ]
         try:
-            await asyncio.gather(*streams, self._outcome_tracker.track())
+            await asyncio.gather(
+                *streams,
+                self._outcome_tracker.track(),
+                self._data.refresh_market_data(),
+            )
         finally:
             await self._data.close()
             log.info("Scanner shut down cleanly.")
