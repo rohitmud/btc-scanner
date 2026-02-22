@@ -1317,7 +1317,14 @@ class TelegramNotifier:
                 indicator_parts.append(f"[{mark}] {k.upper()} {score}")
         indicator_line = "  ".join(indicator_parts)
 
-        exp_str = alert.expires_at[:16].replace("T", " ") + " UTC"
+        exp_str  = alert.expires_at[:16].replace("T", " ") + " UTC"
+        lv       = alert.leverage_rec
+        lev_line = (
+            f"Cons <b>{lv['conservative']}x</b>"
+            f"  ·  Mod <b>{lv['moderate']}x</b>"
+            f"  ·  Aggr <b>{lv['aggressive']}x</b>"
+            f"  <i>(SL {lv['sl_distance_pct']}% away)</i>"
+        )
         return (
             f"<b>[{direction}]</b>  {alert.symbol}  —  {alert.timeframe}\n"
             f"<b>Confidence : {alert.confidence_score:.1f} / 100</b>\n"
@@ -1329,6 +1336,7 @@ class TelegramNotifier:
             f"Risk/Rew   : {alert.risk_reward:.2f}x\n"
             f"OI Signal  : {alert.oi_signal}\n"
             f"Valid For  : ~{alert.valid_for_minutes} min  (until {exp_str})\n"
+            f"Leverage   : {lev_line}\n"
             f"\n"
             f"<code>{indicator_line}</code>\n"
             f"\n"
@@ -1395,6 +1403,7 @@ class WhatsAppNotifier:
             for k, v in bd.items() if isinstance(v, dict)
         )
         exp_str = alert.expires_at[:16].replace("T", " ") + " UTC"
+        lv      = alert.leverage_rec
         return (
             f"[BTC/USDT] {arrow} | {alert.timeframe}\n"
             f"Confidence: {alert.confidence_score:.0f}/100\n\n"
@@ -1404,7 +1413,9 @@ class WhatsAppNotifier:
             f"Stop:     ${alert.stop_loss:,.2f}\n"
             f"R:R:      {alert.risk_reward:.2f}x\n"
             f"OI:       {alert.oi_signal}\n"
-            f"Valid:    ~{alert.valid_for_minutes} min (until {exp_str})\n\n"
+            f"Valid:    ~{alert.valid_for_minutes} min (until {exp_str})\n"
+            f"Leverage: {lv['conservative']}x / {lv['moderate']}x / {lv['aggressive']}x"
+            f"  (Cons/Mod/Aggr · SL {lv['sl_distance_pct']}% away)\n\n"
             f"{checks}\n"
             f"{alert.timestamp[:16].replace('T', ' ')} UTC"
         )
