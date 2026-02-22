@@ -92,8 +92,8 @@ CONFIG: dict = {
     # Set via environment variables (recommended) or paste values directly.
     #   Windows:  set TELEGRAM_TOKEN=123:ABC   &&  set TELEGRAM_CHAT_ID=-1001234
     #   Linux:    export TELEGRAM_TOKEN=...    &&  export TELEGRAM_CHAT_ID=...
-    "telegram_token":   os.getenv("bot8517637983:AAFlP6R3Gcz6BzyEPcjfKRv_oSje6faO2gM",   ""),
-    "telegram_chat_id": os.getenv("548714316", ""),
+    "telegram_token":   os.getenv("TELEGRAM_TOKEN",   ""),
+    "telegram_chat_id": os.getenv("TELEGRAM_CHAT_ID", ""),
 
     # ── WhatsApp Notifications (via CallMeBot – free) ─────────────────────
     # Setup (one-time, 2 minutes):
@@ -246,13 +246,38 @@ class DataManager:
         Poll OHLCV via async REST every N seconds and fire `callback(tf, df)`
         whenever a new closed candle arrives.  Uses REST instead of WebSocket
         so it works in cloud environments where Binance WebSocket is blocked.
+
+        Resilience design
+        -----------------
+        - asyncio.wait_for(timeout=25) prevents the coroutine hanging forever
+          if Binance accepts the TCP connection but stops sending data.
+        - Heartbeat written on EVERY successful poll (not just new-candle polls)
+          so /status correctly shows alive even in low-volatility periods.
+        - signal-analysis callback wrapped separately so an indicator/signal
+          crash does not kill the poll loop.
         """
-        prev_ts: int = 0
-        poll_s = self._POLL_SECONDS.get(tf, 60)
+        prev_ts: int  = 0
+        poll_s        = self._POLL_SECONDS.get(tf, 60)
+        poll_count    = 0
 
         while True:
             try:
-                candles = await self._ws.fetch_ohlcv(self._symbol, tf, limit=200)
+                poll_count += 1
+                log.info(f"[{tf}] poll #{poll_count} (every {poll_s}s) …")
+
+                # Hard 25s timeout – a silent hang kills the scanner with no error
+                candles = await asyncio.wait_for(
+                    self._ws.fetch_ohlcv(self._symbol, tf, limit=200),
+                    timeout=25,
+                )
+
+                # Heartbeat on every successful response (not just new candles)
+                try:
+                    with open("scanner_heartbeat.txt", "w") as _hb:
+                        _hb.write(datetime.now(timezone.utc).isoformat())
+                except OSError:
+                    pass
+
                 new_candles = 0
                 for c in candles:
                     if c[0] > prev_ts:
@@ -261,26 +286,48 @@ class DataManager:
                         new_candles += 1
 
                 if new_candles > 0:
+                    log.info(f"[{tf}] {new_candles} new candle(s) – running analysis …")
                     df = self._to_dataframe(tf)
                     if df is not None:
-                        await callback(tf, df)
-                        # Heartbeat so /status can confirm scanner is alive
                         try:
-                            with open("scanner_heartbeat.txt", "w") as _hb:
-                                _hb.write(datetime.now(timezone.utc).isoformat())
-                        except OSError:
-                            pass
+                            await callback(tf, df)
+                        except Exception as cb_exc:
+                            log.error(f"[{tf}] analysis error: {cb_exc}", exc_info=True)
+                            try:
+                                with open("scanner_error.txt", "w") as _ef:
+                                    _ef.write(
+                                        f"{datetime.now(timezone.utc).isoformat()} "
+                                        f"| [{tf}] analysis: {cb_exc}"
+                                    )
+                            except OSError:
+                                pass
+                else:
+                    log.debug(f"[{tf}] no new candles this poll.")
 
                 await asyncio.sleep(poll_s)
+
+            except asyncio.TimeoutError:
+                log.warning(f"[{tf}] fetch_ohlcv timed out after 25s – retrying in 15s …")
+                try:
+                    with open("scanner_error.txt", "w") as _ef:
+                        _ef.write(
+                            f"{datetime.now(timezone.utc).isoformat()} | [{tf}] timeout"
+                        )
+                except OSError:
+                    pass
+                await asyncio.sleep(15)
 
             except ccxt.RateLimitExceeded:
                 log.warning(f"[{tf}] rate-limit – backing off 60s …")
                 await asyncio.sleep(60)
+
             except Exception as exc:
-                log.error(f"[{tf}] poll error: {exc} – retrying in 15s …")
+                log.error(f"[{tf}] poll error: {exc}", exc_info=True)
                 try:
                     with open("scanner_error.txt", "w") as _ef:
-                        _ef.write(f"{datetime.now(timezone.utc).isoformat()} | [{tf}] poll: {exc}")
+                        _ef.write(
+                            f"{datetime.now(timezone.utc).isoformat()} | [{tf}] poll: {exc}"
+                        )
                 except OSError:
                     pass
                 await asyncio.sleep(15)
