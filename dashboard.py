@@ -525,6 +525,24 @@ function renderTable() {
     `Showing ${filtered.length} of ${TRADES.length} trades`;
 }
 
+// ─── Signal Validity Helper ───────────────────────────────────────────────
+function validityRow(a) {
+  if (!a.expires_at) return '';
+  const exp     = new Date(a.expires_at);
+  const expired = exp < new Date();
+  // Convert expires_at to HH:MM IST
+  const ist  = new Date(exp.getTime() + 330 * 60 * 1000);
+  const pad  = n => String(n).padStart(2, '0');
+  const time = pad(ist.getUTCHours()) + ':' + pad(ist.getUTCMinutes()) + ' IST';
+  const mins = a.valid_for_minutes || '?';
+  if (expired) {
+    return `<div style="margin-top:5px;font-size:0.78rem;color:var(--loss);opacity:0.8">` +
+           `&#8987; Expired &nbsp;&bull;&nbsp; was valid ~${mins} min</div>`;
+  }
+  return `<div style="margin-top:5px;font-size:0.78rem;color:#4ade80">` +
+         `&#9200; Active &nbsp;&bull;&nbsp; valid ~${mins} min &nbsp;&bull;&nbsp; until ${time}</div>`;
+}
+
 // ─── Live Alerts ──────────────────────────────────────────────────────────
 (function renderAlerts() {
   if (!ALERTS.length) return;
@@ -561,6 +579,7 @@ function renderTable() {
         ${a.oi_signal ? `&nbsp;&nbsp;<span style="color:var(--muted);font-size:0.78rem">${a.oi_signal}</span>` : ''}
       </div>
       <div style="margin-top:6px">${chips}</div>
+      ${validityRow(a)}
     </div>`;
   }).join('');
 })();
@@ -598,6 +617,7 @@ if (SERVE_MODE) {
           &nbsp;&nbsp;<span style="color:var(--muted);font-size:0.78rem">${a.oi_signal||''}</span>
         </div>
         <div style="margin-top:6px">${chips}</div>
+        ${validityRow(a)}
       </div>`;
     }).join('');
   }

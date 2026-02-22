@@ -32,7 +32,7 @@ import sys
 import time
 import threading
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from collections import deque
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
@@ -127,6 +127,8 @@ class TradeAlert:
     confidence_score:     float  # 0 – 100
     oi_signal:            str    # "Strong Bullish" | "Strong Bearish" | …
     timestamp:            str
+    valid_for_minutes:    int    # practical validity window (based on timeframe)
+    expires_at:           str    # UTC ISO timestamp when signal expires
     indicator_breakdown:  dict
 
     def to_json(self, indent: int = 2) -> str:
@@ -678,6 +680,18 @@ class SignalGenerator:
     marginal setups in back-testing).
     """
 
+    # How long a signal remains practically valid, keyed by timeframe.
+    # Rule of thumb: ~15× the candle duration, capped so 1h stays within a session.
+    _VALIDITY: Dict[str, int] = {
+        "1m":  15,    # 15 minutes
+        "3m":  30,    # 30 minutes
+        "5m":  60,    # 1 hour
+        "15m": 180,   # 3 hours
+        "30m": 360,   # 6 hours
+        "1h":  480,   # 8 hours
+        "4h":  1440,  # 24 hours
+    }
+
     # Original base weights – never modified; used as clamp reference by WeightLearner
     # 12 indicators, sum = 100
     _BASE_WEIGHTS = {
@@ -760,6 +774,10 @@ class SignalGenerator:
         reward = abs(target_1 - entry)
         rr     = round(reward / risk, 2) if risk > 0 else 0.0
 
+        now_utc       = datetime.now(timezone.utc)
+        valid_minutes = self._VALIDITY.get(tf, 60)
+        expires_at    = (now_utc + timedelta(minutes=valid_minutes)).isoformat()
+
         return TradeAlert(
             symbol              = self._cfg["symbol"],
             signal_type         = direction,
@@ -771,7 +789,9 @@ class SignalGenerator:
             risk_reward         = rr,
             confidence_score    = round(score, 1),
             oi_signal           = self._oi_label(direction, oi_now, oi_prev),
-            timestamp           = datetime.now(timezone.utc).isoformat(),
+            timestamp           = now_utc.isoformat(),
+            valid_for_minutes   = valid_minutes,
+            expires_at          = expires_at,
             indicator_breakdown = breakdown,
         )
 
@@ -1101,6 +1121,8 @@ class AlertFormatter:
         print(f"  Risk / Reward : {alert.risk_reward:.2f}x")
         print(f"  OI Signal     : {alert.oi_signal}")
         print(f"  Confidence    : {alert.confidence_score:.1f} / 100")
+        exp_str = alert.expires_at[:16].replace("T", " ") + " UTC"
+        print(f"  Valid For     : ~{alert.valid_for_minutes} min  (until {exp_str})")
         print(cls._BAR)
         print("  Indicator Breakdown:")
         bd = alert.indicator_breakdown
@@ -1187,6 +1209,7 @@ class TelegramNotifier:
                 indicator_parts.append(f"[{mark}] {k.upper()} {score}")
         indicator_line = "  ".join(indicator_parts)
 
+        exp_str = alert.expires_at[:16].replace("T", " ") + " UTC"
         return (
             f"<b>[{direction}]</b>  {alert.symbol}  —  {alert.timeframe}\n"
             f"<b>Confidence : {alert.confidence_score:.1f} / 100</b>\n"
@@ -1197,6 +1220,7 @@ class TelegramNotifier:
             f"Stop Loss  : <b>${alert.stop_loss:,.2f}</b>  (2x ATR)\n"
             f"Risk/Rew   : {alert.risk_reward:.2f}x\n"
             f"OI Signal  : {alert.oi_signal}\n"
+            f"Valid For  : ~{alert.valid_for_minutes} min  (until {exp_str})\n"
             f"\n"
             f"<code>{indicator_line}</code>\n"
             f"\n"
@@ -1262,6 +1286,7 @@ class WhatsAppNotifier:
             ("✓" if v.get("aligned") else "✗") + k.upper()
             for k, v in bd.items() if isinstance(v, dict)
         )
+        exp_str = alert.expires_at[:16].replace("T", " ") + " UTC"
         return (
             f"[BTC/USDT] {arrow} | {alert.timeframe}\n"
             f"Confidence: {alert.confidence_score:.0f}/100\n\n"
@@ -1270,7 +1295,8 @@ class WhatsAppNotifier:
             f"Target 2: ${alert.target_2:,.2f}\n"
             f"Stop:     ${alert.stop_loss:,.2f}\n"
             f"R:R:      {alert.risk_reward:.2f}x\n"
-            f"OI:       {alert.oi_signal}\n\n"
+            f"OI:       {alert.oi_signal}\n"
+            f"Valid:    ~{alert.valid_for_minutes} min (until {exp_str})\n\n"
             f"{checks}\n"
             f"{alert.timestamp[:16].replace('T', ' ')} UTC"
         )
