@@ -93,8 +93,8 @@ CONFIG: dict = {
     # Set via environment variables (recommended) or paste values directly.
     #   Windows:  set TELEGRAM_TOKEN=123:ABC   &&  set TELEGRAM_CHAT_ID=-1001234
     #   Linux:    export TELEGRAM_TOKEN=...    &&  export TELEGRAM_CHAT_ID=...
-    "telegram_token":   os.getenv("TELEGRAM_TOKEN",   "8517637983:AAFlP6R3Gcz6BzyEPcjfKRv_oSje6faO2gM"),
-    "telegram_chat_id": os.getenv("TELEGRAM_CHAT_ID", "548714316"),
+    "telegram_token":   os.getenv("TELEGRAM_TOKEN",   ""),
+    "telegram_chat_id": os.getenv("TELEGRAM_CHAT_ID", ""),
 
     # ── WhatsApp Notifications (via CallMeBot – free) ─────────────────────
     # Setup (one-time, 2 minutes):
