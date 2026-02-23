@@ -527,7 +527,28 @@ function renderTable() {
 
 // ─── Leverage Recommendation Helper ──────────────────────────────────────
 function leverageRow(a) {
-  const lv = a.leverage_rec;
+  let lv = a.leverage_rec;
+  // Fall back: compute from entry_price + stop_loss so old alerts also show leverage
+  if (!lv) {
+    const entry = parseFloat(a.entry_price || a.entry || 0);
+    const sl    = parseFloat(a.stop_loss   || 0);
+    const conf  = parseFloat(a.confidence_score || 75);
+    if (entry > 0 && sl > 0) {
+      const slPct  = Math.abs(entry - sl) / entry;
+      const safeMax = slPct > 0 ? (0.5 / slPct) : 2;
+      const cap     = conf >= 90 ? 25 : conf >= 85 ? 20 : conf >= 80 ? 15 : conf >= 75 ? 10 : 5;
+      const capped  = Math.min(safeMax, cap, 25);
+      const tiers   = [2, 3, 5, 7, 10, 15, 20, 25];
+      const snap    = v => tiers.slice().reverse().find(t => v >= t) || 2;
+      lv = {
+        conservative:    snap(Math.max(2, capped * 0.30)),
+        moderate:        snap(Math.max(2, capped * 0.60)),
+        aggressive:      snap(Math.max(2, capped)),
+        sl_distance_pct: (slPct * 100).toFixed(2),
+        max_theoretical: Math.floor(slPct > 0 ? 1.0 / slPct : 1),
+      };
+    }
+  }
   if (!lv) return '';
   const badge = (label, val, color) =>
     `<span style="background:${color};color:#000;font-weight:700;border-radius:4px;padding:1px 6px;font-size:0.75rem;margin-right:4px">${label} ${val}x</span>`;
@@ -550,7 +571,7 @@ function validityRow(a) {
   const time = pad(ist.getUTCHours()) + ':' + pad(ist.getUTCMinutes()) + ' IST';
   const mins = a.valid_for_minutes || '?';
   if (expired) {
-    return `<div style="margin-top:5px;font-size:0.78rem;color:var(--loss);opacity:0.8">` +
+    return `<div style="margin-top:5px;font-size:0.78rem;color:#ffffff;opacity:0.7">` +
            `&#8987; Expired &nbsp;&bull;&nbsp; was valid ~${mins} min</div>`;
   }
   return `<div style="margin-top:5px;font-size:0.78rem;color:#4ade80">` +
@@ -628,10 +649,11 @@ if (SERVE_MODE) {
           &nbsp;&nbsp;<span style="color:var(--muted)">T1</span> <b class="win">$${parseFloat(a.target_1).toLocaleString(undefined,{minimumFractionDigits:2})}</b>
           &nbsp;&nbsp;<span style="color:var(--muted)">T2</span> <b class="win">$${parseFloat(a.target_2||a.target_1).toLocaleString(undefined,{minimumFractionDigits:2})}</b>
           &nbsp;&nbsp;<span style="color:var(--muted)">SL</span> <b class="loss">$${parseFloat(a.stop_loss).toLocaleString(undefined,{minimumFractionDigits:2})}</b>
-          &nbsp;&nbsp;<span style="color:var(--muted)">R:R</span> <b>${parseFloat(a.risk_reward||a.rr||0).toFixed(2)}x</b>
+          &nbsp;&nbsp;<span style="color:var(--muted)">R:R</span> <b style="color:#ffffff">${parseFloat(a.risk_reward||a.rr||0).toFixed(2)}x</b>
           &nbsp;&nbsp;<span style="color:var(--muted);font-size:0.78rem">${a.oi_signal||''}</span>
         </div>
         <div style="margin-top:6px">${chips}</div>
+        ${leverageRow(a)}
         ${validityRow(a)}
       </div>`;
     }).join('');
