@@ -49,7 +49,7 @@ import pandas_ta as ta  # noqa – registers .ta accessor
 # Logging
 # ---------------------------------------------------------------------------
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG if os.getenv("SCANNER_DEBUG") else logging.INFO,
     format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
 )
@@ -93,8 +93,8 @@ CONFIG: dict = {
     # Set via environment variables (recommended) or paste values directly.
     #   Windows:  set TELEGRAM_TOKEN=123:ABC   &&  set TELEGRAM_CHAT_ID=-1001234
     #   Linux:    export TELEGRAM_TOKEN=...    &&  export TELEGRAM_CHAT_ID=...
-    "telegram_token":   os.getenv("TELEGRAM_TOKEN",   ""),
-    "telegram_chat_id": os.getenv("TELEGRAM_CHAT_ID", ""),
+    "telegram_token":   os.getenv("TELEGRAM_TOKEN",   "8517637983:AAFlP6R3Gcz6BzyEPcjfKRv_oSje6faO2gM"),
+    "telegram_chat_id": os.getenv("TELEGRAM_CHAT_ID", "548714316"),
 
     # ── WhatsApp Notifications (via CallMeBot – free) ─────────────────────
     # Setup (one-time, 2 minutes):
@@ -778,6 +778,17 @@ class SignalGenerator:
             ind["macd_hist"] < ind["macd_hist_prev"]      # … and falling
         )
 
+        # ── Diagnostic logging (visible in local/server logs) ─────────────
+        log.debug(
+            f"[{tf}] gate check │ "
+            f"ema_bull={ind['ema_bullish']} "
+            f"above_vwap={ind['close'] > ind['vwap']} "
+            f"rsi={ind['rsi']:.1f} "
+            f"macd_pos={ind['macd_hist'] > 0} "
+            f"macd_rising={ind['macd_hist'] > ind['macd_hist_prev']} "
+            f"→ LONG={long_entry} SHORT={short_entry}"
+        )
+
         if not long_entry and not short_entry:
             return None
 
@@ -787,7 +798,17 @@ class SignalGenerator:
             funding_rate, fear_greed, taker_ratio, ls_ratio,
         )
 
+        earned_str = "  ".join(
+            f"{k}={v['earned']:.0f}/{v['weight']}"
+            for k, v in breakdown.items() if isinstance(v, dict)
+        )
+        log.info(
+            f"[{tf}] {direction} gate PASSED │ score={score:.1f}/"
+            f"{self._cfg['confidence_threshold']} │ {earned_str}"
+        )
+
         if score < self._cfg["confidence_threshold"]:
+            log.info(f"[{tf}] {direction} REJECTED – score too low ({score:.1f} < {self._cfg['confidence_threshold']})")
             return None
 
         entry   = ind["close"]
@@ -1317,14 +1338,7 @@ class TelegramNotifier:
                 indicator_parts.append(f"[{mark}] {k.upper()} {score}")
         indicator_line = "  ".join(indicator_parts)
 
-        exp_str  = alert.expires_at[:16].replace("T", " ") + " UTC"
-        lv       = alert.leverage_rec
-        lev_line = (
-            f"Cons <b>{lv['conservative']}x</b>"
-            f"  ·  Mod <b>{lv['moderate']}x</b>"
-            f"  ·  Aggr <b>{lv['aggressive']}x</b>"
-            f"  <i>(SL {lv['sl_distance_pct']}% away)</i>"
-        )
+        exp_str = alert.expires_at[:16].replace("T", " ") + " UTC"
         return (
             f"<b>[{direction}]</b>  {alert.symbol}  —  {alert.timeframe}\n"
             f"<b>Confidence : {alert.confidence_score:.1f} / 100</b>\n"
@@ -1336,7 +1350,6 @@ class TelegramNotifier:
             f"Risk/Rew   : {alert.risk_reward:.2f}x\n"
             f"OI Signal  : {alert.oi_signal}\n"
             f"Valid For  : ~{alert.valid_for_minutes} min  (until {exp_str})\n"
-            f"Leverage   : {lev_line}\n"
             f"\n"
             f"<code>{indicator_line}</code>\n"
             f"\n"
@@ -1403,7 +1416,6 @@ class WhatsAppNotifier:
             for k, v in bd.items() if isinstance(v, dict)
         )
         exp_str = alert.expires_at[:16].replace("T", " ") + " UTC"
-        lv      = alert.leverage_rec
         return (
             f"[BTC/USDT] {arrow} | {alert.timeframe}\n"
             f"Confidence: {alert.confidence_score:.0f}/100\n\n"
@@ -1413,9 +1425,7 @@ class WhatsAppNotifier:
             f"Stop:     ${alert.stop_loss:,.2f}\n"
             f"R:R:      {alert.risk_reward:.2f}x\n"
             f"OI:       {alert.oi_signal}\n"
-            f"Valid:    ~{alert.valid_for_minutes} min (until {exp_str})\n"
-            f"Leverage: {lv['conservative']}x / {lv['moderate']}x / {lv['aggressive']}x"
-            f"  (Cons/Mod/Aggr · SL {lv['sl_distance_pct']}% away)\n\n"
+            f"Valid:    ~{alert.valid_for_minutes} min (until {exp_str})\n\n"
             f"{checks}\n"
             f"{alert.timestamp[:16].replace('T', ' ')} UTC"
         )
