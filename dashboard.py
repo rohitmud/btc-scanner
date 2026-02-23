@@ -743,7 +743,10 @@ def make_handler(alerts_path: str, backtest_path: str, poll_interval: int):
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Cache-Control", "no-store")
             self.end_headers()
-            self.wfile.write(body)
+            try:
+                self.wfile.write(body)
+            except BrokenPipeError:
+                pass  # client closed connection before response was fully sent
 
         def do_GET(self):
             if self.path in ("/", "/index.html"):
