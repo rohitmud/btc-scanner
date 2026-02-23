@@ -610,7 +610,7 @@ function validityRow(a) {
         &nbsp;&nbsp;<span style="color:var(--muted)">T1</span> <b class="win">$${parseFloat(a.target_1).toLocaleString(undefined,{minimumFractionDigits:2})}</b>
         &nbsp;&nbsp;<span style="color:var(--muted)">T2</span> <b class="win">$${parseFloat(a.target_2||a.target_1).toLocaleString(undefined,{minimumFractionDigits:2})}</b>
         &nbsp;&nbsp;<span style="color:var(--muted)">SL</span> <b class="loss">$${parseFloat(a.stop_loss).toLocaleString(undefined,{minimumFractionDigits:2})}</b>
-        &nbsp;&nbsp;<span style="color:var(--muted)">R:R</span> <b>${parseFloat(a.risk_reward||a.rr||0).toFixed(2)}x</b>
+        &nbsp;&nbsp;<span style="color:var(--muted)">R:R</span> <b style="color:#ffffff">${parseFloat(a.risk_reward||a.rr||0).toFixed(2)}x</b>
         ${a.oi_signal ? `&nbsp;&nbsp;<span style="color:var(--muted);font-size:0.78rem">${a.oi_signal}</span>` : ''}
       </div>
       <div style="margin-top:6px">${chips}</div>
