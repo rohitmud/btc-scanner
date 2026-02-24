@@ -1338,7 +1338,18 @@ class TelegramNotifier:
                 indicator_parts.append(f"[{mark}] {k.upper()} {score}")
         indicator_line = "  ".join(indicator_parts)
 
-        exp_str = alert.expires_at[:16].replace("T", " ") + " UTC"
+        IST = timezone(timedelta(hours=5, minutes=30))
+        expires_ist = datetime.fromisoformat(alert.expires_at).astimezone(IST)
+        exp_str     = expires_ist.strftime("%d %b %H:%M IST")
+        ts_ist      = datetime.fromisoformat(alert.timestamp).astimezone(IST)
+        ts_str      = ts_ist.strftime("%d %b %H:%M IST")
+
+        lv = alert.leverage_rec
+        lv_line = (
+            f"Leverage   : 🟢 {lv['conservative']}x  🟡 {lv['moderate']}x  🔴 {lv['aggressive']}x"
+            f"  (SL {lv['sl_distance_pct']}% away)"
+        )
+
         return (
             f"<b>[{direction}]</b>  {alert.symbol}  —  {alert.timeframe}\n"
             f"<b>Confidence : {alert.confidence_score:.1f} / 100</b>\n"
@@ -1350,10 +1361,11 @@ class TelegramNotifier:
             f"Risk/Rew   : {alert.risk_reward:.2f}x\n"
             f"OI Signal  : {alert.oi_signal}\n"
             f"Valid For  : ~{alert.valid_for_minutes} min  (until {exp_str})\n"
+            f"{lv_line}\n"
             f"\n"
             f"<code>{indicator_line}</code>\n"
             f"\n"
-            f"<i>{alert.timestamp[:16].replace('T', ' ')} UTC</i>"
+            f"<i>{ts_str}</i>"
         )
 
 
